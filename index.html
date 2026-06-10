@@ -219,8 +219,8 @@ function setDefaultTimes(){
   const hh=String(n.getHours()).padStart(2,'0');
   const mm=String(n.getMinutes()).padStart(2,'0');
   const ds=n.toISOString().slice(0,10),ts=`${hh}:${mm}`;
-  ['f-date','s-date'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=ds;});
-  ['f-time','s-time'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=ts;});
+  ['f-date','s-date','d-date'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=ds;});
+  ['f-time','s-time','d-time'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=ts;});
 }
 setDefaultTimes();
 
@@ -251,7 +251,10 @@ window.logEntry=async(type)=>{
     entry.quality=document.getElementById('s-quality').value;
     entry.notes=document.getElementById('s-notes').value;
   }else{
-    entry.ts=now.toISOString();
+    const dd=document.getElementById('d-date').value||todayStr();
+    const dt=document.getElementById('d-time').value||fmtTime(now.toISOString());
+    const [dh,dm]=dt.split(':');const d=new Date(dd);d.setHours(parseInt(dh),parseInt(dm),0,0);
+    entry.ts=d.toISOString();
     entry.label=`${selectedDiaperType} diaper`;
     entry.sub=document.getElementById('d-color').value;
     entry.consistency=document.getElementById('d-consistency').value;
@@ -920,6 +923,10 @@ body{font-family:'Nunito',sans-serif;background:#EDF7F4;color:#1a2e35;min-height
           </div>
           <div class="card">
             <div class="card-title"><i class="ti ti-droplet"></i> Diaper</div>
+            <div class="form-row-2">
+              <div class="form-row"><label class="form-label">Date</label><input class="form-input" type="date" id="d-date"/></div>
+              <div class="form-row"><label class="form-label">Time</label><input class="form-input" type="time" id="d-time"/></div>
+            </div>
             <div class="form-row"><label class="form-label">Type</label>
               <div class="toggle-row" id="diaper-type-row">
                 <div class="toggle-opt sel" onclick="selectDiaper(this,'Wet')">💧 Wet</div>
