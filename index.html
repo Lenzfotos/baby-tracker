@@ -140,12 +140,18 @@ async function loadHousehold(){
   showScreen('app');
 }
 
+let renderDebounce=null;
 function subscribeEntries(){
   if(unsubEntries)unsubEntries();
   const q=query(collection(db,'households',householdId,'entries'),orderBy('ts','desc'));
-  unsubEntries=onSnapshot(q,snap=>{
-    localEntries=snap.docs.map(d=>({docId:d.id,...d.data()}));
-    renderHistory();renderDashboard();updateEntryCount();
+  unsubEntries=onSnapshot(q,{includeMetadataChanges:false},snap=>{
+    localEntries=snap.docs
+      .map(d=>({docId:d.id,...d.data()}))
+      .sort((a,b)=>new Date(b.ts)-new Date(a.ts));
+    clearTimeout(renderDebounce);
+    renderDebounce=setTimeout(()=>{
+      renderHistory();renderDashboard();updateEntryCount();
+    },80);
   });
 }
 
@@ -344,7 +350,7 @@ function renderHistory(){
   const list=document.getElementById('history-list');if(!list)return;
   if(!filtered.length){list.innerHTML='<div class="empty"><i class="ti ti-notes"></i>No entries yet.</div>';return;}
   const icons={feeding:'ti-tool-kitchen-2',sleep:'ti-moon',diaper:'ti-droplet'};
-  list.innerHTML=filtered.slice(0,100).map((e,i)=>{
+  list.innerHTML=filtered.slice(0,500).map((e,i)=>{
     const flagged=e.flagged?'flagged':'';
     return`<div class="log-entry">
       <div class="log-icon"><i class="ti ${icons[e.type]||'ti-notes'}"></i></div>
