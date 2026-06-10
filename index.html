@@ -360,7 +360,7 @@ window.openEdit=docId=>{
   const types={feeding:'Feeding',sleep:'Sleep',diaper:'Diaper'};
   document.getElementById('editModalTitle').innerHTML=`<i class="ti ${icons[e.type]}"></i> Edit ${types[e.type]||'Entry'}`;
   const d=new Date(e.ts);
-  const dateVal=d.toISOString().slice(0,10);
+  const dateVal=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   const timeVal=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
   let fields=`<div class="form-row-2">
     <div class="form-row"><label class="form-label">Date</label><input class="form-input" type="date" id="edit-date" value="${dateVal}"/></div>
