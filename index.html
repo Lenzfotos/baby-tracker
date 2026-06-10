@@ -31,7 +31,14 @@ const provider=new GoogleAuthProvider();
 let currentUser=null,householdId=null,householdData=null,isOwner=false;
 let localEntries=[],membersList=[];
 let unsubEntries=null,unsubHousehold=null;
-let feedChart,sleepChart,diaperChart,weightChart;
+let feedAttempted=false;
+window.toggleFeedAttempt=()=>{
+  feedAttempted=!feedAttempted;
+  const box=document.getElementById('f-attempt-box');
+  const icon=document.getElementById('f-attempt-icon');
+  if(box) box.classList.toggle('checked',feedAttempted);
+  if(icon) icon.style.display=feedAttempted?'block':'none';
+};
 let dashRange='today',histFilter='all',weightRange='week';
 let selectedDiaperType='Wet',selectedSleepEvent='Fell asleep';
 let editIdx=-1,editDocId=null;
@@ -233,7 +240,7 @@ window.logEntry=async(type)=>{
   if(type==='feeding'){
     const fd=document.getElementById('f-date').value||todayStr();
     const ft=document.getElementById('f-time').value||fmtTime(now.toISOString());
-    const [fh,fm]=ft.split(':');const d=new Date(fd);d.setHours(parseInt(fh),parseInt(fm),0,0);
+    const [fh,fm]=ft.split(':');const d=new Date(`${fd}T${ft}:00`);
     entry.ts=d.toISOString();
     entry.label=document.getElementById('f-type').value||'Feeding';
     const amt=document.getElementById('f-amount').value;
@@ -241,6 +248,7 @@ window.logEntry=async(type)=>{
     entry.sub=amt?`${amt} oz`:dur?`${dur} min`:'';
     entry.notes=document.getElementById('f-notes').value;
     entry.amount=amt;entry.duration=dur;
+    entry.attempted=feedAttempted;
   }else if(type==='sleep'){
     const sd=document.getElementById('s-date').value||todayStr();
     const st=document.getElementById('s-time').value||fmtTime(now.toISOString());
@@ -266,6 +274,7 @@ window.logEntry=async(type)=>{
     showToast('✓ Saved & synced!');
     const ids={feeding:['f-type','f-amount','f-duration','f-notes'],sleep:['s-location','s-quality','s-notes'],diaper:['d-color','d-consistency','d-notes']};
     (ids[type]||[]).forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+    if(type==='feeding'){feedAttempted=false;const box=document.getElementById('f-attempt-box');const icon=document.getElementById('f-attempt-icon');if(box)box.classList.remove('checked');if(icon)icon.style.display='none';}
     setDefaultTimes();
   }catch(e){showToast('Error saving: '+e.message);}
   btn.disabled=false;
@@ -326,7 +335,7 @@ function renderHistory(){
       <div class="log-icon"><i class="ti ${icons[e.type]||'ti-notes'}"></i></div>
       <div class="log-detail">
         <div class="log-main">${e.flagged?'<span class="flag-dot"></span>':''}${e.label||'—'}</div>
-        <div class="log-sub">${[e.sub,e.notes].filter(Boolean).join(' · ')}${e.loggedBy?` <span style="color:var(--teal);font-size:10px">· ${e.loggedBy}</span>`:''}</div>
+        <div class="log-sub">${[e.sub,e.notes].filter(Boolean).join(' · ')}${e.attempted?' <span style="background:#fef3c7;color:#d97706;font-size:10px;padding:2px 6px;border-radius:8px;font-weight:700">Attempted</span>':''}${e.loggedBy?` <span style="color:var(--teal);font-size:10px">· ${e.loggedBy}</span>`:''}</div>
       </div>
       <div class="log-time">${fmtDate(e.ts)}<br>${fmtTime(e.ts)}</div>
       <div class="entry-actions">
@@ -736,6 +745,10 @@ body{font-family:'Nunito',sans-serif;background:#EDF7F4;color:#1a2e35;min-height
 .export-btn{padding:13px;border:none;border-radius:var(--radius-sm);font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;font-family:'Nunito',sans-serif}
 .export-btn.pdf{background:var(--teal);color:#fff}
 .export-btn.csv{background:var(--teal-light);color:var(--teal);border:1.5px solid var(--teal)}
+/* Attempt checkbox */
+.check-label{display:flex;align-items:center;gap:10px;cursor:pointer;font-size:13px;font-weight:600;color:var(--text);user-select:none}
+.check-box{width:20px;height:20px;border-radius:6px;border:2px solid var(--border);background:var(--gray);display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .15s}
+.check-box.checked{background:var(--teal);border-color:var(--teal)}
 .custom-range{display:none;margin-bottom:12px}
 .custom-range.show{display:block}
 .spinner{width:16px;height:16px;border:2.5px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
@@ -896,6 +909,12 @@ body{font-family:'Nunito',sans-serif;background:#EDF7F4;color:#1a2e35;min-height
             <div class="form-row"><label class="form-label">Type</label>
               <select class="form-input" id="f-type"><option value="">Select…</option><option>Breastmilk – Left</option><option>Breastmilk – Right</option><option>Breastmilk – Both sides</option><option>Bottle – Breastmilk</option><option>Bottle – Formula</option></select>
             </div>
+            <div class="form-row">
+              <label class="check-label" onclick="toggleFeedAttempt()">
+                <div class="check-box" id="f-attempt-box"><i class="ti ti-check" id="f-attempt-icon" style="display:none;font-size:13px;color:#fff"></i></div>
+                <span>Attempted feed (baby did not latch or refused)</span>
+              </label>
+            </div>
             <div class="form-row-2">
               <div class="form-row"><label class="form-label">Amount (oz)</label><input class="form-input" type="number" id="f-amount" placeholder="e.g. 2.5" step="0.5" min="0"/></div>
               <div class="form-row"><label class="form-label">Duration (min)</label><input class="form-input" type="number" id="f-duration" placeholder="e.g. 15" min="0"/></div>
@@ -1000,28 +1019,6 @@ body{font-family:'Nunito',sans-serif;background:#EDF7F4;color:#1a2e35;min-height
           <div class="chart-wrap"><canvas id="weightChart"></canvas></div>
           <div style="font-size:11px;color:var(--muted);margin-top:8px;text-align:center;font-weight:500">Log weight in Settings. WHO bands appear once DOB is set.</div>
         </div>
-        <!-- Share card -->
-        <div class="card">
-          <div class="card-title"><i class="ti ti-share"></i> Share with caregivers</div>
-          <p class="config-note">Share the invite code below with anyone you want to give access. They open this app, sign in with Google, and enter the code to join your household.</p>
-          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--teal-light);border:1.5px solid var(--teal-mid);border-radius:var(--radius-sm);padding:14px 16px;margin-bottom:12px">
-            <div>
-              <div style="font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Invite code</div>
-              <div style="font-size:26px;font-weight:700;color:var(--teal);letter-spacing:4px" id="invite-code-display">——</div>
-            </div>
-            <div class="owner-only">
-              <button onclick="regenerateInviteCode()" style="background:var(--white);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;font-size:12px;cursor:pointer;color:var(--muted);font-family:'Nunito',sans-serif;font-weight:600"><i class="ti ti-refresh"></i> New code</button>
-            </div>
-          </div>
-          <button class="submit-btn" onclick="shareApp()"><i class="ti ti-share"></i> Share App Link</button>
-          <div id="share-fallback" style="display:none;margin-top:12px">
-            <label class="form-label">App link</label>
-            <div style="display:flex;gap:8px">
-              <input class="form-input" type="text" id="share-url-input" readonly style="font-size:12px"/>
-              <button onclick="copyShareUrl()" style="flex-shrink:0;padding:11px 14px;background:var(--teal);color:#fff;border:none;border-radius:var(--radius-sm);font-weight:700;cursor:pointer;font-family:'Nunito',sans-serif">Copy</button>
-            </div>
-          </div>
-        </div>
         <!-- Export (owner only) -->
         <div class="card owner-only">
           <div class="card-title"><i class="ti ti-download"></i> Export Data <span style="font-size:11px;background:var(--teal-light);color:var(--teal);padding:3px 8px;border-radius:10px;font-weight:700">Owner only</span></div>
@@ -1081,11 +1078,6 @@ body{font-family:'Nunito',sans-serif;background:#EDF7F4;color:#1a2e35;min-height
           </div>
           <div style="font-size:12px;color:var(--muted);margin-top:10px;font-weight:500" id="settings-role-note"></div>
         </div>
-        <!-- Household members -->
-        <div class="card">
-          <div class="card-title"><i class="ti ti-users"></i> Household members</div>
-          <div id="members-list"><div style="font-size:13px;color:var(--muted)">Loading…</div></div>
-        </div>
         <!-- Weight log -->
         <div class="card">
           <div class="card-title"><i class="ti ti-scale"></i> Log Weight</div>
@@ -1097,6 +1089,33 @@ body{font-family:'Nunito',sans-serif;background:#EDF7F4;color:#1a2e35;min-height
           <div class="form-row"><label class="form-label">Date weighed</label><input class="form-input" type="date" id="w-date"/></div>
           <button class="submit-btn" onclick="logWeight()"><i class="ti ti-device-floppy"></i> Save Weight Entry</button>
           <div id="weight-history-preview" style="margin-top:14px"></div>
+        </div>
+        <!-- Household members -->
+        <div class="card">
+          <div class="card-title"><i class="ti ti-users"></i> Household members</div>
+          <div id="members-list"><div style="font-size:13px;color:var(--muted)">Loading…</div></div>
+        </div>
+        <!-- Share -->
+        <div class="card">
+          <div class="card-title"><i class="ti ti-share"></i> Share with caregivers</div>
+          <p class="config-note">Share the invite code below with anyone you want to give access. They open this app, sign in with Google, and enter the code to join your household.</p>
+          <div style="display:flex;align-items:center;justify-content:space-between;background:var(--teal-light);border:1.5px solid var(--teal-mid);border-radius:var(--radius-sm);padding:14px 16px;margin-bottom:12px">
+            <div>
+              <div style="font-size:11px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px">Invite code</div>
+              <div style="font-size:26px;font-weight:700;color:var(--teal);letter-spacing:4px" id="invite-code-display">——</div>
+            </div>
+            <div class="owner-only">
+              <button onclick="regenerateInviteCode()" style="background:var(--white);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px;font-size:12px;cursor:pointer;color:var(--muted);font-family:'Nunito',sans-serif;font-weight:600"><i class="ti ti-refresh"></i> New code</button>
+            </div>
+          </div>
+          <button class="submit-btn" onclick="shareApp()"><i class="ti ti-share"></i> Share App Link</button>
+          <div id="share-fallback" style="display:none;margin-top:12px">
+            <label class="form-label">App link</label>
+            <div style="display:flex;gap:8px">
+              <input class="form-input" type="text" id="share-url-input" readonly style="font-size:12px"/>
+              <button onclick="copyShareUrl()" style="flex-shrink:0;padding:11px 14px;background:var(--teal);color:#fff;border:none;border-radius:var(--radius-sm);font-weight:700;cursor:pointer;font-family:'Nunito',sans-serif">Copy</button>
+            </div>
+          </div>
         </div>
         <!-- Data info -->
         <div class="card">
