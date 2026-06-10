@@ -43,6 +43,21 @@ let dashRange='today',histFilter='all',weightRange='week';
 let selectedDiaperType='Wet',selectedSleepEvent='Fell asleep';
 let editIdx=-1,editDocId=null;
 let exportPreset='today',exportCats=new Set(['feeding','sleep','diaper']);
+let feedChartFilter='actual'; // 'actual' | 'attempted' | 'all'
+let diaperChartFilter='all';  // 'all' | 'wet' | 'dirty' | 'both'
+
+window.setFeedFilter=(val,el)=>{
+  feedChartFilter=val;
+  document.querySelectorAll('[id^="ff-"]').forEach(x=>x.classList.remove('active'));
+  el.classList.add('active');
+  renderDashboard();
+};
+window.setDiaperFilter=(val,el)=>{
+  diaperChartFilter=val;
+  document.querySelectorAll('[id^="df-"]').forEach(x=>x.classList.remove('active'));
+  el.classList.add('active');
+  renderDashboard();
+};
 
 // ── BOOT ──────────────────────────────────────────────────────
 setPersistence(auth,browserLocalPersistence);
@@ -474,7 +489,7 @@ function renderDashboard(){
 
   const{from,to,mode}=getDashWindow();
   const filtered=localEntries.filter(e=>{const d=new Date(e.ts);return d>=from&&d<=to;});
-  const feeds=filtered.filter(e=>e.type==='feeding');
+  const feeds=filtered.filter(e=>e.type==='feeding'&&!e.attempted); // stat always shows actual feedings
   const diapers=filtered.filter(e=>e.type==='diaper');
   const totalOz=feeds.reduce((s,e)=>{const m=e.sub?.match(/^([\d.]+)\s*oz/);return s+(m?parseFloat(m[1]):0);},0);
   document.getElementById('stat-feeds').textContent=feeds.length||'0';
@@ -504,14 +519,30 @@ function renderDashboard(){
   const scEl=freshCanvas('sleepChart');
   const dcEl=freshCanvas('diaperChart');
   if(!fcEl||!scEl||!dcEl)return;
+
+  // Filter helpers
+  function matchFeed(e){
+    if(e.type!=='feeding')return false;
+    if(feedChartFilter==='actual') return !e.attempted;
+    if(feedChartFilter==='attempted') return !!e.attempted;
+    return true; // 'all'
+  }
+  function matchDiaper(e){
+    if(e.type!=='diaper')return false;
+    if(diaperChartFilter==='wet') return e.label?.toLowerCase().startsWith('wet');
+    if(diaperChartFilter==='dirty') return e.label?.toLowerCase().startsWith('dirty');
+    if(diaperChartFilter==='both') return e.label?.toLowerCase().startsWith('both');
+    return true; // 'all'
+  }
+
   let labels=[],feedData=[],diaperData=[];
   if(mode==='today'){
     for(let h=0;h<24;h++)labels.push(h===0?'12am':h<12?`${h}am`:h===12?'12pm':`${h-12}pm`);
     let cf=0,cd=0;
     const dk=localKey(from);
     for(let h=0;h<24;h++){
-      cf+=localEntries.filter(e=>e.type==='feeding'&&localKey(e.ts)===dk&&new Date(e.ts).getHours()===h).length;
-      cd+=localEntries.filter(e=>e.type==='diaper'&&localKey(e.ts)===dk&&new Date(e.ts).getHours()===h).length;
+      cf+=localEntries.filter(e=>matchFeed(e)&&localKey(e.ts)===dk&&new Date(e.ts).getHours()===h).length;
+      cd+=localEntries.filter(e=>matchDiaper(e)&&localKey(e.ts)===dk&&new Date(e.ts).getHours()===h).length;
       feedData.push(cf);diaperData.push(cd);
     }
   }else if(mode==='month'){
@@ -520,8 +551,8 @@ function renderDashboard(){
     [[1,7],[8,14],[15,21],[22,lastDay]].forEach((w,i)=>{
       labels.push(`Wk ${i+1}\n${w[0]}–${w[1]}`);
       const ws=new Date(yr,mo,w[0]),we=new Date(yr,mo,w[1],23,59,59);
-      feedData.push(localEntries.filter(e=>e.type==='feeding'&&new Date(e.ts)>=ws&&new Date(e.ts)<=we).length);
-      diaperData.push(localEntries.filter(e=>e.type==='diaper'&&new Date(e.ts)>=ws&&new Date(e.ts)<=we).length);
+      feedData.push(localEntries.filter(e=>matchFeed(e)&&new Date(e.ts)>=ws&&new Date(e.ts)<=we).length);
+      diaperData.push(localEntries.filter(e=>matchDiaper(e)&&new Date(e.ts)>=ws&&new Date(e.ts)<=we).length);
     });
   }else{
     const diff=Math.round((to-from)/86400000)+1;
@@ -530,16 +561,16 @@ function renderDashboard(){
         const d=new Date(from.getFullYear(),from.getMonth(),from.getDate()+i);
         const dk=localKey(d);
         labels.push(d.toLocaleDateString([],{month:'short',day:'numeric'}));
-        feedData.push(localEntries.filter(e=>e.type==='feeding'&&localKey(e.ts)===dk).length);
-        diaperData.push(localEntries.filter(e=>e.type==='diaper'&&localKey(e.ts)===dk).length);
+        feedData.push(localEntries.filter(e=>matchFeed(e)&&localKey(e.ts)===dk).length);
+        diaperData.push(localEntries.filter(e=>matchDiaper(e)&&localKey(e.ts)===dk).length);
       }
     }else{
       let cur=new Date(from.getFullYear(),from.getMonth(),from.getDate());
       while(cur<=to){
         const we=new Date(Math.min(cur.getTime()+6*86400000,to.getTime()));
         labels.push(cur.toLocaleDateString([],{month:'short',day:'numeric'}));
-        feedData.push(localEntries.filter(e=>e.type==='feeding'&&new Date(e.ts)>=cur&&new Date(e.ts)<=we).length);
-        diaperData.push(localEntries.filter(e=>e.type==='diaper'&&new Date(e.ts)>=cur&&new Date(e.ts)<=we).length);
+        feedData.push(localEntries.filter(e=>matchFeed(e)&&new Date(e.ts)>=cur&&new Date(e.ts)<=we).length);
+        diaperData.push(localEntries.filter(e=>matchDiaper(e)&&new Date(e.ts)>=cur&&new Date(e.ts)<=we).length);
         cur=new Date(cur.getFullYear(),cur.getMonth(),cur.getDate()+7);
       }
     }
@@ -763,6 +794,8 @@ body{font-family:'Nunito',sans-serif;background:#EDF7F4;color:#1a2e35;min-height
 .seg-btn.active{background:var(--teal);color:#fff}
 .range-pill{padding:7px 14px;border-radius:20px;border:1.5px solid var(--border);font-size:12px;font-weight:700;cursor:pointer;background:var(--gray);color:var(--muted);font-family:'Nunito',sans-serif;transition:all .15s;white-space:nowrap}
 .range-pill.active{background:var(--teal);color:#fff;border-color:var(--teal)}
+.chart-filter{padding:5px 12px;border-radius:20px;border:1.5px solid var(--border);font-size:11px;font-weight:700;cursor:pointer;background:var(--gray);color:var(--muted);font-family:'Nunito',sans-serif;transition:all .15s;white-space:nowrap}
+.chart-filter.active{background:var(--teal-light);border-color:var(--teal);color:var(--teal)}
 .benchmark-legend{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:11px;font-weight:600;color:var(--muted)}
 .legend-dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:3px}
 .weight-seg{display:flex;background:var(--white);border:1px solid var(--border);border-radius:var(--radius-sm);padding:3px;margin-bottom:14px}
@@ -1030,6 +1063,11 @@ body{font-family:'Nunito',sans-serif;background:#EDF7F4;color:#1a2e35;min-height
         </div>
         <div class="card">
           <div class="card-title"><i class="ti ti-chart-line"></i> Feedings per day <button class="info-icon" onclick="showInfo('feeding')"><i class="ti ti-info-circle"></i></button></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+            <button class="chart-filter active" id="ff-actual" onclick="setFeedFilter('actual',this)">✓ Actual</button>
+            <button class="chart-filter" id="ff-attempted" onclick="setFeedFilter('attempted',this)">⚡ Attempted</button>
+            <button class="chart-filter" id="ff-all" onclick="setFeedFilter('all',this)">All</button>
+          </div>
           <div class="benchmark-legend"><span><span class="legend-dot" style="background:#1D9E75"></span>Baby</span><span><span class="legend-dot" style="background:rgba(255,180,0,.7)"></span>AAP (8–12/day)</span></div>
           <div class="chart-wrap"><canvas id="feedChart"></canvas></div>
         </div>
@@ -1040,6 +1078,12 @@ body{font-family:'Nunito',sans-serif;background:#EDF7F4;color:#1a2e35;min-height
         </div>
         <div class="card">
           <div class="card-title"><i class="ti ti-droplet"></i> Diapers per day <button class="info-icon" onclick="showInfo('diaper')"><i class="ti ti-info-circle"></i></button></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+            <button class="chart-filter active" id="df-all" onclick="setDiaperFilter('all',this)">All</button>
+            <button class="chart-filter" id="df-wet" onclick="setDiaperFilter('wet',this)">💧 Wet</button>
+            <button class="chart-filter" id="df-dirty" onclick="setDiaperFilter('dirty',this)">💩 Dirty</button>
+            <button class="chart-filter" id="df-both" onclick="setDiaperFilter('both',this)">💧💩 Both</button>
+          </div>
           <div class="benchmark-legend"><span><span class="legend-dot" style="background:#1D9E75"></span>Baby</span><span><span class="legend-dot" style="background:rgba(255,120,100,.6)"></span>AAP (6–8/day)</span></div>
           <div class="chart-wrap"><canvas id="diaperChart"></canvas></div>
         </div>
