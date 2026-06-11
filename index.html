@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <script type="module">
 import{initializeApp}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import{getAuth,GoogleAuthProvider,signInWithPopup,signOut,onAuthStateChanged,setPersistence,browserLocalPersistence}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import{getAuth,GoogleAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,signOut,onAuthStateChanged,setPersistence,browserLocalPersistence}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import{getFirestore,doc,setDoc,getDoc,addDoc,updateDoc,deleteDoc,collection,query,onSnapshot,orderBy,getDocs}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const firebaseConfig={apiKey:"AIzaSyCWgep90LXLN3VhMeZx2IdJHfo4ut8JROc",authDomain:"baby-tracker-f1eed.firebaseapp.com",projectId:"baby-tracker-f1eed",storageBucket:"baby-tracker-f1eed.firebasestorage.app",messagingSenderId:"1071084232072",appId:"1:1071084232072:web:409cdfd67509792618ee3d"};
@@ -58,7 +58,26 @@ onAuthStateChanged(auth,async user=>{
 });
 
 // ── AUTH ─────────────────────────────────────────────────────
-window.signInGoogle=async()=>{try{setBtnLoading('btn-google',true,'Signing in…');await signInWithPopup(auth,provider);}catch(e){setBtnLoading('btn-google',false,'<i class="ti ti-brand-google"></i> Sign in with Google');showToast('Sign in failed: '+e.message);}};
+// Handle redirect result on page load (mobile Safari uses redirect not popup)
+getRedirectResult(auth).then(result=>{
+  if(result?.user)console.log('Signed in via redirect');
+}).catch(e=>{if(e.code!=='auth/no-current-user')console.error('Redirect result error:',e);});
+
+const isMobile=/iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+window.signInGoogle=async()=>{
+  try{
+    setBtnLoading('btn-google',true,'Signing in…');
+    if(isMobile){
+      // Mobile Safari blocks popups — use redirect instead
+      await signInWithRedirect(auth,provider);
+    }else{
+      await signInWithPopup(auth,provider);
+    }
+  }catch(e){
+    setBtnLoading('btn-google',false,'<i class="ti ti-brand-google"></i> Sign in with Google');
+    showToast('Sign in failed: '+e.message);
+  }
+};
 window.signOutUser=async()=>{if(!confirm('Sign out?'))return;if(unsubEntries)unsubEntries();if(unsubHousehold)unsubHousehold();await signOut(auth);localEntries=[];membersList=[];householdId=null;householdData=null;};
 
 // ── HOUSEHOLD ────────────────────────────────────────────────
@@ -100,6 +119,8 @@ async function loadHousehold(){
   });
   subscribeEntries();
   showScreen('app');
+  // Check if a feed timer was left running
+  setTimeout(checkActiveTimer,500);
 }
 function subscribeEntries(){
   if(unsubEntries)unsubEntries();
