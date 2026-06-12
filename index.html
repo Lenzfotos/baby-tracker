@@ -37,6 +37,7 @@ let localEntries=[],membersList=[];
 let unsubEntries=null,unsubHousehold=null;
 let feedAttempted=false;
 let dashRange='today',histFilter='all',weightRange='week';
+let groupMode=false,groupSel=new Set(); // History feeding-session grouping
 let selectedDiaperType='Wet',selectedSleepEvent='Fell asleep';
 let editDocId=null;
 let exportPreset='today',exportCats=new Set(['feeding','sleep','diaper']);
@@ -47,8 +48,12 @@ let renderDebounce=null;
 let chartInstances={};
 
 // ── BOOT ─────────────────────────────────────────────────────
+// Preview mode: add ?preview=1 to the URL to skip login and view the app
+// with sample data (nothing is read from or written to Firebase).
+const PREVIEW=new URLSearchParams(location.search).has('preview');
 setPersistence(auth,browserLocalPersistence);
 onAuthStateChanged(auth,async user=>{
+  if(PREVIEW)return; // ignore real auth state while previewing
   currentUser=user;
   if(user){
     const snap=await getDoc(doc(db,'users',user.uid));
@@ -59,7 +64,7 @@ onAuthStateChanged(auth,async user=>{
 
 // ── AUTH ─────────────────────────────────────────────────────
 // Handle redirect result on page load (mobile Safari uses redirect not popup)
-getRedirectResult(auth).then(result=>{
+if(!PREVIEW)getRedirectResult(auth).then(result=>{
   if(result?.user)console.log('Signed in via redirect');
 }).catch(e=>{if(e.code!=='auth/no-current-user')console.error('Redirect result error:',e);});
 
@@ -93,11 +98,42 @@ async function signInGoogle(){
 // Expose for manual testing from the DevTools console: __signIn()
 window.__signIn=signInGoogle;
 
+// ── PREVIEW MODE (sample data, no Firebase) ───────────────────
+function genPreviewEntries(){
+  const out=[];let id=0;
+  const mk=(daysAgo,h,m,o)=>{const d=new Date();d.setDate(d.getDate()-daysAgo);d.setHours(h,m,0,0);return{ts:d.toISOString(),docId:'pv'+(id++),flagged:false,loggedBy:'Preview User',...o};};
+  for(let day=0;day<7;day++){
+    [6,9,12,15,18,21].forEach((h,i)=>{
+      const oz=3+Math.round(Math.random()*3);
+      const end=new Date();end.setDate(end.getDate()-day);end.setHours(h,18,0,0);
+      out.push(mk(day,h,0,{type:'feeding',label:i%2?'Bottle – Formula':'Breastmilk – Both sides',amount:String(oz),sub:oz+' oz',duration:16+Math.round(Math.random()*12),tsEnd:end.toISOString(),attempted:false}));
+    });
+    [7,11,14,17,20,23].forEach((h,i)=>{const t=i%3===0?'Dirty':'Wet';out.push(mk(day,h,15,{type:'diaper',label:t+' diaper',sub:t==='Dirty'?'Yellow':'',consistency:t==='Dirty'?'Seedy':''}));});
+    [13,19,1].forEach(h=>out.push(mk(day,h,30,{type:'sleep',label:'Fell asleep',sub:'Crib',quality:'Good'})));
+  }
+  return out.sort((a,b)=>new Date(b.ts)-new Date(a.ts));
+}
+function enterPreview(){
+  currentUser={uid:'preview-uid',displayName:'Preview User',email:'preview@example.com',photoURL:''};
+  householdId='preview';
+  householdData={babyName:'Lucas',dob:'2025-12-01',sex:'Boy',inviteCode:'PREVEW',ownerUid:'preview-uid',members:{'preview-uid':{name:'Preview User',email:'preview@example.com',photo:'',role:'owner'}}};
+  isOwner=true;
+  membersList=Object.entries(householdData.members).map(([uid,d])=>({uid,...d}));
+  localEntries=genPreviewEntries();
+  showScreen('app');
+  updateHouseholdUI();
+  renderHistory();
+  renderDashboard();
+  updateEntryCount();
+  showToast('👀 Preview mode — sample data, nothing is saved');
+}
+
 // Attach all button handlers via JS (not onclick attrs) to avoid module scope issues
 document.addEventListener('DOMContentLoaded',()=>{
   document.getElementById('btn-google')?.addEventListener('click',signInGoogle);
   document.getElementById('btn-create-hh')?.addEventListener('click',()=>createHousehold());
   document.getElementById('btn-join-hh')?.addEventListener('click',()=>joinHousehold());
+  if(PREVIEW)enterPreview();
 });
 window.signOutUser=async()=>{if(!confirm('Sign out?'))return;if(unsubEntries)unsubEntries();if(unsubHousehold)unsubHousehold();await signOut(auth);localEntries=[];membersList=[];householdId=null;householdData=null;};
 
@@ -330,47 +366,118 @@ async function renderWeightPreview(){
 
 // ── HISTORY ──────────────────────────────────────────────────
 window.filterHistory=(f,el)=>{histFilter=f;document.querySelectorAll('#page-history .seg-btn').forEach(x=>x.classList.remove('active'));el.classList.add('active');renderHistory();};
-function renderHistory(){
-  const filtered=histFilter==='all'?localEntries:localEntries.filter(e=>e.type===histFilter);
-  const list=document.getElementById('history-list');if(!list)return;
-  if(!filtered.length){list.innerHTML='<div class="empty"><i class="ti ti-notes"></i>No entries yet.</div>';return;}
-  const icons={feeding:'ti-tool-kitchen-2',sleep:'ti-moon',diaper:'ti-droplet'};
-  list.innerHTML=filtered.slice(0,500).map(e=>{
-    const flagged=e.flagged?'flagged':'';
-    // Build expanded detail rows
-    let details='';
-    if(e.type==='feeding'){
-      if(e.label)details+=`<div class="detail-row"><span>Type</span><span>${e.label}</span></div>`;
-      if(e.amount)details+=`<div class="detail-row"><span>Amount</span><span>${e.amount} oz</span></div>`;
-      if(e.duration)details+=`<div class="detail-row"><span>Duration</span><span>${e.duration} min</span></div>`;
-      if(e.tsEnd)details+=`<div class="detail-row"><span>End time</span><span>${fmtTime(e.tsEnd)}</span></div>`;
-      if(e.attempted)details+=`<div class="detail-row"><span>Status</span><span style="color:#d97706">Attempted</span></div>`;
-    }else if(e.type==='sleep'){
-      if(e.label)details+=`<div class="detail-row"><span>Event</span><span>${e.label}</span></div>`;
-      if(e.sub)details+=`<div class="detail-row"><span>Location</span><span>${e.sub}</span></div>`;
-      if(e.quality)details+=`<div class="detail-row"><span>Quality</span><span>${e.quality}</span></div>`;
-    }else if(e.type==='diaper'){
-      if(e.label)details+=`<div class="detail-row"><span>Type</span><span>${e.label}</span></div>`;
-      if(e.sub)details+=`<div class="detail-row"><span>Color</span><span>${e.sub}</span></div>`;
-      if(e.consistency)details+=`<div class="detail-row"><span>Consistency</span><span>${e.consistency}</span></div>`;
-    }
-    if(e.notes)details+=`<div class="detail-row"><span>Notes</span><span>${e.notes}</span></div>`;
-    if(e.loggedBy)details+=`<div class="detail-row"><span>Logged by</span><span>${e.loggedBy}</span></div>`;
-    return`<div class="log-entry" onclick="toggleEntryExpand(this)">
-      <div class="log-icon"><i class="ti ${icons[e.type]||'ti-notes'}"></i></div>
+const HIST_ICONS={feeding:'ti-tool-kitchen-2',sleep:'ti-moon',diaper:'ti-droplet'};
+function ozOf(e){const m=String(e.sub||'').match(/^([\d.]+)\s*oz/);return m?parseFloat(m[1]):(parseFloat(e.amount)||0);}
+function fmtOz(n){return n%1?n.toFixed(1):String(n);}
+// Count feedings treating each group as a single feeding
+function countFeedingUnits(arr){const seen=new Set();let c=0;for(const e of arr){if(e.groupId){if(!seen.has(e.groupId)){seen.add(e.groupId);c++;}}else c++;}return c;}
+function entryDetails(e){
+  let details='';
+  if(e.type==='feeding'){
+    if(e.label)details+=`<div class="detail-row"><span>Type</span><span>${e.label}</span></div>`;
+    if(e.amount)details+=`<div class="detail-row"><span>Amount</span><span>${e.amount} oz</span></div>`;
+    if(e.duration)details+=`<div class="detail-row"><span>Duration</span><span>${e.duration} min</span></div>`;
+    if(e.tsEnd)details+=`<div class="detail-row"><span>End time</span><span>${fmtTime(e.tsEnd)}</span></div>`;
+    if(e.attempted)details+=`<div class="detail-row"><span>Status</span><span style="color:#d97706">Attempted</span></div>`;
+  }else if(e.type==='sleep'){
+    if(e.label)details+=`<div class="detail-row"><span>Event</span><span>${e.label}</span></div>`;
+    if(e.sub)details+=`<div class="detail-row"><span>Location</span><span>${e.sub}</span></div>`;
+    if(e.quality)details+=`<div class="detail-row"><span>Quality</span><span>${e.quality}</span></div>`;
+  }else if(e.type==='diaper'){
+    if(e.label)details+=`<div class="detail-row"><span>Type</span><span>${e.label}</span></div>`;
+    if(e.sub)details+=`<div class="detail-row"><span>Color</span><span>${e.sub}</span></div>`;
+    if(e.consistency)details+=`<div class="detail-row"><span>Consistency</span><span>${e.consistency}</span></div>`;
+  }
+  if(e.notes)details+=`<div class="detail-row"><span>Notes</span><span>${e.notes}</span></div>`;
+  if(e.loggedBy)details+=`<div class="detail-row"><span>Logged by</span><span>${e.loggedBy}</span></div>`;
+  return details;
+}
+function singleRowHTML(e){
+  const flagged=e.flagged?'flagged':'';
+  const selectable=groupMode&&e.type==='feeding'&&!e.groupId;
+  const selected=groupSel.has(e.docId);
+  const dimmed=groupMode&&!selectable;
+  const onclick=selectable?`toggleGroupSelect('${e.docId}')`:`toggleEntryExpand(this)`;
+  return`<div class="log-entry${selected?' selected':''}${dimmed?' dimmed':''}" onclick="${onclick}">
+      ${selectable?`<div class="sel-check"><i class="ti ti-check"></i></div>`:`<div class="log-icon"><i class="ti ${HIST_ICONS[e.type]||'ti-notes'}"></i></div>`}
       <div class="log-detail">
         <div class="log-main">${e.flagged?'<span class="flag-dot"></span>':''}${e.label||'—'}${e.attempted?' <span style="background:#fef3c7;color:#d97706;font-size:10px;padding:2px 6px;border-radius:8px;font-weight:700">Attempted</span>':''}</div>
         <div class="log-sub">${[e.sub,e.notes].filter(Boolean).join(' · ')}${e.loggedBy?` <span style="color:var(--teal);font-size:10px">· ${e.loggedBy}</span>`:''}</div>
-        <div class="log-expanded" style="display:none">${details}</div>
+        <div class="log-expanded" style="display:none">${entryDetails(e)}</div>
       </div>
       <div class="log-time">${fmtDate(e.ts)}<br>${fmtTime(e.ts)}</div>
-      <div class="entry-actions" onclick="event.stopPropagation()">
+      ${groupMode?'':`<div class="entry-actions" onclick="event.stopPropagation()">
         <button class="entry-btn ${flagged}" onclick="toggleFlag('${e.docId}',${!!e.flagged})" title="${e.flagged?'Unflag':'Flag for doctor'}"><i class="ti ti-flag"></i></button>
         <button class="entry-btn" onclick="openEdit('${e.docId}')" title="Edit"><i class="ti ti-pencil"></i></button>
-      </div>
+      </div>`}
     </div>`;
-  }).join('');
 }
+function sessionRowHTML(g){
+  const items=g.items.slice().sort((a,b)=>new Date(a.ts)-new Date(b.ts));
+  const first=items[0],last=items[items.length-1];
+  const totalOz=items.reduce((s,e)=>s+ozOf(e),0);
+  const totalMin=items.reduce((s,e)=>s+(e.duration||0),0);
+  const range=`${fmtTime(first.ts)} – ${fmtTime(last.ts)}`;
+  let details=items.map(e=>`<div class="detail-row"><span>${fmtTime(e.ts)} · ${e.label||'Feeding'}</span><span>${ozOf(e)?fmtOz(ozOf(e))+' oz':(e.duration?e.duration+' min':'—')}</span></div>`).join('');
+  details+=`<div class="detail-row" style="font-weight:800;color:var(--teal)"><span>Total eaten</span><span>${fmtOz(totalOz)} oz${totalMin?` · ${minToHM(totalMin)}`:''}</span></div>`;
+  return`<div class="log-entry session${groupMode?' dimmed':''}" onclick="toggleEntryExpand(this)">
+      <div class="log-icon session-icon"><i class="ti ti-layers-intersect"></i></div>
+      <div class="log-detail">
+        <div class="log-main">Feeding session <span class="session-badge">${items.length} feeds${totalOz?` · ${fmtOz(totalOz)} oz`:''}</span></div>
+        <div class="log-sub">${range}</div>
+        <div class="log-expanded" style="display:none">${details}</div>
+      </div>
+      <div class="log-time">${fmtDate(last.ts)}<br>${fmtTime(last.ts)}</div>
+      ${groupMode?'':`<div class="entry-actions" onclick="event.stopPropagation()">
+        <button class="entry-btn" onclick="ungroupSession('${g.groupId}')" title="Ungroup session"><i class="ti ti-layers-off"></i></button>
+      </div>`}
+    </div>`;
+}
+function renderHistory(){
+  const list=document.getElementById('history-list');if(!list)return;
+  const filtered=histFilter==='all'?localEntries:localEntries.filter(e=>e.type===histFilter);
+  if(!filtered.length){list.innerHTML='<div class="empty"><i class="ti ti-notes"></i>No entries yet.</div>';updateGroupBar();return;}
+  // Collapse grouped feedings into one "session" item at the latest member's position
+  const groups={},display=[];
+  for(const e of filtered.slice(0,800)){
+    if(e.type==='feeding'&&e.groupId){
+      if(!groups[e.groupId]){groups[e.groupId]={kind:'session',groupId:e.groupId,items:[]};display.push(groups[e.groupId]);}
+      groups[e.groupId].items.push(e);
+    }else display.push({kind:'single',entry:e});
+  }
+  list.innerHTML=display.slice(0,500).map(d=>d.kind==='session'?sessionRowHTML(d):singleRowHTML(d.entry)).join('');
+  updateGroupBar();
+}
+// ── HISTORY GROUPING (feeding sessions) ───────────────────────
+function updateGroupBar(){
+  const bar=document.getElementById('group-actionbar');if(bar)bar.style.display=groupMode?'flex':'none';
+  const btn=document.getElementById('btn-group-mode');if(btn){btn.classList.toggle('active',groupMode);btn.innerHTML=groupMode?'<i class="ti ti-x"></i> Done':'<i class="ti ti-layers-intersect"></i> Group feedings';}
+  const cnt=document.getElementById('group-count');if(cnt)cnt.textContent=`${groupSel.size} selected`;
+  const conf=document.getElementById('btn-group-confirm');if(conf)conf.disabled=groupSel.size<2;
+  const hint=document.getElementById('group-hint');if(hint)hint.textContent=groupMode?'Tap feeding entries to combine into one session':'Tap any entry to expand details';
+}
+window.toggleGroupMode=()=>{if(groupMode){window.exitGroupMode();return;}groupMode=true;groupSel.clear();if(!localStorage.getItem('groupHelpSeen'))openGroupHelp();renderHistory();};
+window.exitGroupMode=()=>{groupMode=false;groupSel.clear();renderHistory();};
+window.toggleGroupSelect=docId=>{if(groupSel.has(docId))groupSel.delete(docId);else groupSel.add(docId);renderHistory();};
+async function setEntryGroup(docId,groupId){
+  const e=localEntries.find(x=>x.docId===docId);if(e)e.groupId=groupId||null;
+  if(!PREVIEW&&householdId)await updateDoc(doc(db,'households',householdId,'entries',docId),{groupId:groupId||null});
+}
+window.groupSelected=async()=>{
+  if(groupSel.size<2){showToast('Select at least 2 feedings to group');return;}
+  const gid='g'+Date.now().toString(36);const ids=[...groupSel];
+  for(const id of ids)await setEntryGroup(id,gid);
+  showToast(`✓ Grouped ${ids.length} feedings into a session`);
+  groupMode=false;groupSel.clear();renderHistory();renderDashboard();
+};
+window.ungroupSession=async groupId=>{
+  if(!confirm('Ungroup this feeding session?'))return;
+  const ids=localEntries.filter(e=>e.groupId===groupId).map(e=>e.docId);
+  for(const id of ids)await setEntryGroup(id,null);
+  showToast('Session ungrouped');renderHistory();renderDashboard();
+};
+window.openGroupHelp=()=>{document.getElementById('groupHelpOverlay')?.classList.add('show');document.body.style.overflow='hidden';};
+window.closeGroupHelp=()=>{document.getElementById('groupHelpOverlay')?.classList.remove('show');document.body.style.overflow='';localStorage.setItem('groupHelpSeen','1');};
 window.toggleEntryExpand=el=>{const exp=el.querySelector('.log-expanded');if(exp)exp.style.display=exp.style.display==='none'?'block':'none';el.classList.toggle('expanded');};
 window.toggleFlag=async(docId,current)=>{await updateDoc(doc(db,'households',householdId,'entries',docId),{flagged:!current});showToast(!current?'🚩 Flagged for doctor':'Flag removed');};
 
@@ -448,6 +555,33 @@ window.onDashCustomChange=()=>{if(dashRange==='custom')renderDashboard();};
 window.setFeedFilter=(val,el)=>{feedChartFilter=val;document.querySelectorAll('[id^="ff-"]').forEach(x=>x.classList.remove('active'));el.classList.add('active');renderDashboard();};
 window.setDiaperFilter=(val,el)=>{diaperChartFilter=val;document.querySelectorAll('[id^="df-"]').forEach(x=>x.classList.remove('active'));el.classList.add('active');renderDashboard();};
 window.setGranularity=(chart,val)=>{if(chart==='feed')feedGranularity=val;else if(chart==='sleep')sleepGranularity=val;else diaperGranularity=val;renderDashboard();};
+// ── GRANULARITY GATING ────────────────────────────────────────
+// A granularity is offered only when it splits the selected range into at least
+// 2 buckets, and not so many that it's unreadable. Keyed off the actual day-span
+// (so the "Month" pill early in the month behaves sensibly).
+const GRAN_LABELS={auto:'Auto',hour:'Hourly',day:'Daily',week:'Weekly',month:'Monthly'};
+function allowedGrans(days){
+  const a=['auto'];
+  if(days<=14)a.push('hour');         // hourly readable up to ~2 weeks
+  if(days>=2&&days<=92)a.push('day');  // daily needs >1 day, capped at ~3 months
+  if(days>=14)a.push('week');          // weekly needs at least ~2 weeks
+  if(days>=60)a.push('month');         // monthly needs at least ~2 months
+  return a;
+}
+function updateGranOptions(){
+  const{from,to}=getDashWindow();
+  const days=Math.round((to-from)/86400000)+1;
+  const allowed=allowedGrans(days);
+  [['gran-feed',()=>feedGranularity,v=>feedGranularity=v],
+   ['gran-sleep',()=>sleepGranularity,v=>sleepGranularity=v],
+   ['gran-diaper',()=>diaperGranularity,v=>diaperGranularity=v]].forEach(([id,get,set])=>{
+    const sel=document.getElementById(id);if(!sel)return;
+    let cur=get();
+    if(!allowed.includes(cur)){cur='auto';set('auto');} // reset if current choice no longer valid
+    sel.innerHTML=allowed.map(v=>`<option value="${v}"${v===cur?' selected':''}>${GRAN_LABELS[v]}</option>`).join('');
+    sel.value=cur;
+  });
+}
 window.setWeightRange=(r,el)=>{weightRange=r;document.querySelectorAll('#weight-seg .seg-btn').forEach(x=>x.classList.remove('active'));el.classList.add('active');renderWeightChart();};
 
 function getDashWindow(){
@@ -474,11 +608,24 @@ function autoGranularity(mode){
 function buildBuckets(from,to,granularity,entryFilter){
   const buckets=[],labels=[];
   if(granularity==='hour'){
-    for(let h=0;h<24;h++){
-      const hLabel=h===0?'12am':h<12?`${h}am`:h===12?'12pm':`${h-12}pm`;
-      labels.push(hLabel);
-      const dk=localKey(from);
-      buckets.push(localEntries.filter(e=>entryFilter(e)&&localKey(e.ts)===dk&&new Date(e.ts).getHours()===h));
+    // Hourly across every day in the range (24 buckets per day). For multi-day
+    // ranges the labels show a date at midnight plus a few hour ticks; the chart
+    // draws a heavier gridline at each midnight so new days read clearly.
+    const start=new Date(from.getFullYear(),from.getMonth(),from.getDate());
+    const dayCount=Math.round((new Date(to.getFullYear(),to.getMonth(),to.getDate())-start)/86400000)+1;
+    const multi=dayCount>1;
+    for(let dd=0;dd<dayCount;dd++){
+      const day=new Date(start.getFullYear(),start.getMonth(),start.getDate()+dd);
+      const dk=localKey(day);
+      for(let h=0;h<24;h++){
+        let label;
+        if(multi){
+          if(h===0)label=day.toLocaleDateString([],{weekday:'short',day:'numeric'});
+          else if(h===6)label='6a';else if(h===12)label='12p';else if(h===18)label='6p';else label='';
+        }else label=h===0?'12am':h<12?`${h}am`:h===12?'12pm':`${h-12}pm`;
+        labels.push(label);
+        buckets.push(localEntries.filter(e=>entryFilter(e)&&localKey(e.ts)===dk&&new Date(e.ts).getHours()===h));
+      }
     }
   }else if(granularity==='day'){
     const diff=Math.round((to-from)/86400000)+1;
@@ -489,13 +636,13 @@ function buildBuckets(from,to,granularity,entryFilter){
       buckets.push(localEntries.filter(e=>entryFilter(e)&&localKey(e.ts)===dk));
     }
   }else if(granularity==='week'){
-    const yr=from.getFullYear(),mo=from.getMonth();
-    const lastDay=new Date(yr,mo+1,0).getDate();
-    [[1,7],[8,14],[15,21],[22,lastDay]].forEach((w,i)=>{
-      const ws=new Date(yr,mo,w[0]),we=new Date(yr,mo,w[1],23,59,59);
-      labels.push(`Wk${i+1} ${w[0]}–${w[1]}`);
+    // Rolling 7-day weeks across the whole range, each labeled by its start date
+    const start=new Date(from.getFullYear(),from.getMonth(),from.getDate());
+    for(let ws=new Date(start);ws<=to;ws=new Date(ws.getFullYear(),ws.getMonth(),ws.getDate()+7)){
+      const we=new Date(ws.getFullYear(),ws.getMonth(),ws.getDate()+6,23,59,59);
+      labels.push(ws.toLocaleDateString([],{month:'short',day:'numeric'}));
       buckets.push(localEntries.filter(e=>entryFilter(e)&&new Date(e.ts)>=ws&&new Date(e.ts)<=we));
-    });
+    }
   }else{// month
     let cur=new Date(from.getFullYear(),from.getMonth(),1);
     while(cur<=to){
@@ -509,17 +656,19 @@ function buildBuckets(from,to,granularity,entryFilter){
 }
 
 function renderDashboard(){
+  updateGranOptions(); // keep each chart's granularity choices valid for the current range
   const{from,to,mode}=getDashWindow();
   const filtered=localEntries.filter(e=>{const d=new Date(e.ts);return d>=from&&d<=to;});
 
   // Stats — always use actual feedings for counts/oz
   const actualFeeds=filtered.filter(e=>e.type==='feeding'&&!e.attempted);
+  const feedCount=countFeedingUnits(actualFeeds); // a grouped session counts as one feeding
   const diapers=filtered.filter(e=>e.type==='diaper');
   const totalOz=actualFeeds.reduce((s,e)=>{const m=String(e.sub||'').match(/^([\d.]+)\s*oz/);return s+(m?parseFloat(m[1]):0);},0);
   const totalFeedMins=actualFeeds.reduce((s,e)=>s+(e.duration||0),0);
   const diffDays=Math.max(1,Math.round((to-from)/86400000)+1);
 
-  document.getElementById('stat-feeds').textContent=actualFeeds.length||'0';
+  document.getElementById('stat-feeds').textContent=feedCount||'0';
   document.getElementById('stat-oz').textContent=totalOz>0?totalOz.toFixed(1):'—';
   document.getElementById('stat-diapers').textContent=diapers.length||'0';
   document.getElementById('stat-sleep').textContent='—';
@@ -530,7 +679,7 @@ function renderDashboard(){
 
   // Averages (show when more than 1 day)
   const showAvg=diffDays>1;
-  const avgFeeds=showAvg?(actualFeeds.length/diffDays).toFixed(1):'—';
+  const avgFeeds=showAvg?(feedCount/diffDays).toFixed(1):'—';
   const avgDiapers=showAvg?(diapers.length/diffDays).toFixed(1):'—';
   const avgOz=showAvg&&totalOz>0?(totalOz/diffDays).toFixed(1):'—';
   document.getElementById('stat-avg-feeds').textContent=showAvg?`avg ${avgFeeds}/day`:'';
@@ -549,23 +698,49 @@ function renderDashboard(){
   const isToday=mode==='today';
 
   function buildChart(canvasId,granularityState,entryFilterFn,benchMin,benchMax,benchColor,benchFillColor,isLine){
-    const gran=granularityState==='auto'?autoGranularity(mode):granularityState;
+    let gran=granularityState==='auto'?autoGranularity(mode):granularityState;
+    // Hourly stays readable up to ~2 weeks; past that it's too dense, so fall back to daily.
+    const MAX_HOURLY_DAYS=14;
+    const rangeDays=Math.round((to-from)/86400000)+1;
+    if(gran==='hour'&&rangeDays>MAX_HOURLY_DAYS)gran='day';
     const{labels,buckets}=buildBuckets(from,to,gran,entryFilterFn);
     const isHour=gran==='hour';
-    // For hourly today: cumulative. For others: count per bucket
+    const isMultiDayHour=isHour&&rangeDays>1;
+    // Cumulative within each day (resets at every midnight = each 24th bucket).
+    // countFeedingUnits collapses grouped feedings to one; others count individually.
     let data;
-    if(isHour){let cum=0;data=buckets.map(b=>{cum+=b.length;return cum;});}
-    else data=buckets.map(b=>b.length);
-    // Benchmarks
-    const bMin=isHour?labels.map((_,i)=>parseFloat((benchMin*(i+1)/24).toFixed(1))):labels.map(()=>benchMin);
-    const bMax=isHour?labels.map((_,i)=>parseFloat((benchMax*(i+1)/24).toFixed(1))):labels.map(()=>benchMax);
-    const minW=Math.max(labels.length*44,100);
+    if(isHour){let cum=0;data=buckets.map((b,i)=>{if(i%24===0)cum=0;cum+=countFeedingUnits(b);return cum;});}
+    else data=buckets.map(countFeedingUnits);
+    // Benchmarks ramp 0→target across each day, resetting daily for hourly views
+    const bMin=isHour?labels.map((_,i)=>parseFloat((benchMin*((i%24)+1)/24).toFixed(1))):labels.map(()=>benchMin);
+    const bMax=isHour?labels.map((_,i)=>parseFloat((benchMax*((i%24)+1)/24).toFixed(1))):labels.map(()=>benchMax);
 
     // Fresh canvas
+    if(chartInstances[canvasId]){try{chartInstances[canvasId].destroy();}catch(e){}delete chartInstances[canvasId];}
     const oldC=document.getElementById(canvasId);
     const wrap=oldC?.parentNode;if(!wrap)return;
     if(oldC)oldC.remove();
-    const newC=document.createElement('canvas');newC.id=canvasId;newC.style.minWidth=minW+'px';wrap.appendChild(newC);
+    const newC=document.createElement('canvas');newC.id=canvasId;
+    // Width: multi-day hourly keeps the same per-hour spacing as the single-day view
+    // by giving each day one screen-width (scrolls a day at a time). Bars need ~44px
+    // each and scroll past ~12 points; single-series lines compress until ~32.
+    const isLineChart=isHour||isLine;
+    let minW=0;
+    if(isMultiDayHour){
+      // Measure the OUTER scroll container (stable viewport width), not the inner
+      // wrapper which grows with the canvas — measuring the inner one compounds
+      // across re-renders and overflows the browser's max canvas size.
+      const scroller=wrap.parentNode;
+      const viewW=Math.round((scroller&&scroller.clientWidth)||wrap.clientWidth||340);
+      minW=Math.min(rangeDays*viewW,16000); // each day ≈ one screen; clamp for safety
+    }
+    else if(isLineChart){minW=labels.length>32?labels.length*44:0;}
+    else{minW=labels.length>12?labels.length*44:0;}
+    // Size the WRAPPER (the element Chart.js measures), NOT the canvas. Setting it on
+    // the canvas only stretches a low-res bitmap (blurry/over-stretched); sizing the
+    // wrapper makes Chart.js render the canvas crisply at full width, then it scrolls.
+    wrap.style.width=minW?minW+'px':'';
+    wrap.appendChild(newC);
 
     const ds=[
       {data:bMin,borderColor:benchColor,borderWidth:1.5,borderDash:[5,4],pointRadius:0,fill:false,type:'line',tension:.3,backgroundColor:'transparent'},
@@ -573,7 +748,11 @@ function renderDashboard(){
       {label:'Baby',data,type:(isHour||isLine)?'line':'bar',borderColor:teal,backgroundColor:(isHour||isLine)?'rgba(29,158,117,0.12)':'rgba(29,158,117,0.25)',fill:isHour||isLine,borderWidth:isHour?2.5:1.5,borderRadius:isHour?0:6,pointBackgroundColor:teal,pointBorderColor:teal,pointRadius:isHour?2:4,tension:.4}
     ];
     const yMax=isHour?Math.max(benchMax+2,Math.ceil((Math.max(...data)||0)+2)):Math.ceil(Math.max(benchMax+2,...data)+1)||undefined;
-    const inst=new Chart(newC,{type:'bar',data:{labels,datasets:ds},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{display:false},ticks:{font:{size:10,family:"'Nunito'"},color:'#6b8a92',maxRotation:45,autoSkip:true,maxTicksLimit:14}},y:{grid:{color:'rgba(0,0,0,.05)'},ticks:{font:{size:11,family:"'Nunito'"},color:'#6b8a92'},beginAtZero:true,max:yMax}}}});
+    // Multi-day hourly: show the (sparse) labels and draw a bold gridline at each midnight as a day marker
+    const xScale=isMultiDayHour
+      ? {grid:{color:c=>c.index%24===0?'rgba(29,158,117,.4)':'transparent',lineWidth:c=>c.index%24===0?2:0},ticks:{font:{size:10,family:"'Nunito'"},color:'#6b8a92',maxRotation:0,autoSkip:false}}
+      : {grid:{display:false},ticks:{font:{size:10,family:"'Nunito'"},color:'#6b8a92',maxRotation:45,autoSkip:true,maxTicksLimit:14}};
+    const inst=new Chart(newC,{type:'bar',data:{labels,datasets:ds},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:xScale,y:{grid:{color:'rgba(0,0,0,.05)'},ticks:{font:{size:11,family:"'Nunito'"},color:'#6b8a92'},beginAtZero:true,max:yMax}}}});
     chartInstances[canvasId]=inst;
   }
 
@@ -719,6 +898,8 @@ input,select,textarea{font-size:16px !important}
 .toggle-opt.sel{background:var(--teal-light);border-color:var(--teal);color:var(--teal)}
 /* Stats */
 .stat-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+/* On mobile (2-col grid) an odd 5th card would leave a gap — let it span full width */
+.stat-row>.stat:nth-child(5):last-child{grid-column:1 / -1}
 .stat{background:linear-gradient(135deg,var(--teal-light) 0%,#d4f0e8 100%);border-radius:var(--radius-sm);padding:14px;text-align:center;border:1px solid var(--teal-mid)}
 .stat-val{font-size:24px;font-weight:700;color:var(--teal);line-height:1}
 .stat-label{font-size:10px;color:#0F6E56;margin-top:3px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
@@ -736,6 +917,25 @@ input,select,textarea{font-size:16px !important}
 .log-entry{display:flex;align-items:flex-start;gap:12px;padding:11px 0;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
 .log-entry:last-child{border-bottom:none}
 .log-entry.expanded{background:var(--teal-light);border-radius:var(--radius-sm);padding:11px 8px;margin:2px 0}
+/* History grouping */
+.group-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.group-hint{font-size:12px;color:var(--muted);font-weight:500}
+.group-btn{background:var(--teal-light);color:var(--teal);border:1px solid var(--teal-mid);border-radius:999px;padding:7px 13px;font-size:12px;font-weight:700;font-family:'Nunito',sans-serif;cursor:pointer;display:flex;align-items:center;gap:6px;white-space:nowrap;transition:all .15s}
+.group-btn.active{background:var(--teal);color:#fff;border-color:var(--teal)}
+.group-btn i{font-size:15px}
+.group-actionbar{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--teal);color:#fff;border-radius:var(--radius-sm);padding:9px 12px 9px 16px;margin-bottom:10px;font-weight:700;font-size:13px}
+.group-actionbar button{border:none;border-radius:8px;padding:8px 16px;font-size:13px;font-weight:700;font-family:'Nunito',sans-serif;cursor:pointer}
+.group-cancel{background:rgba(255,255,255,.2);color:#fff}
+.group-confirm{background:#fff;color:var(--teal)}
+.group-confirm:disabled{opacity:.45;cursor:not-allowed}
+.log-entry.selected{background:var(--teal-light);border-radius:var(--radius-sm);padding-left:8px;padding-right:8px}
+.log-entry.dimmed{opacity:.4}
+.sel-check{width:38px;height:38px;border-radius:50%;border:2px solid var(--teal-mid);display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px;color:transparent;background:#fff;transition:all .15s}
+.log-entry.selected .sel-check{background:var(--teal);border-color:var(--teal);color:#fff}
+.sel-check i{font-size:18px}
+.log-icon.session-icon{background:var(--teal);border-color:var(--teal)}
+.log-icon.session-icon i{color:#fff}
+.session-badge{font-size:10px;background:var(--teal-light);color:var(--teal);padding:2px 7px;border-radius:10px;font-weight:700;margin-left:4px;white-space:nowrap}
 .log-icon{width:38px;height:38px;border-radius:50%;background:var(--teal-light);display:flex;align-items:center;justify-content:center;flex-shrink:0;border:1px solid var(--teal-mid);margin-top:1px}
 .log-icon i{color:var(--teal);font-size:18px}
 .log-detail{flex:1;min-width:0}
@@ -836,6 +1036,7 @@ input,select,textarea{font-size:16px !important}
   .log-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
   .log-grid>.card{margin-bottom:0}
   .stat-row{grid-template-columns:repeat(5,1fr)}
+  .stat-row>.stat:nth-child(5):last-child{grid-column:auto}
   .chart-wrap{height:200px}
   .toast{bottom:24px;right:24px;left:auto;transform:none}
   .edit-overlay{align-items:center;padding:20px}
@@ -910,11 +1111,11 @@ input,select,textarea{font-size:16px !important}
     </div>
 
     <nav class="nav">
+      <button class="nav-btn active" onclick="showPage('log')" id="nav-log"><i class="ti ti-notes"></i>Log</button>
       <button class="nav-btn" onclick="showPage('history')" id="nav-history" style="position:relative">
-        <i class="ti ti-notes"></i>Notes
+        <i class="ti ti-history"></i>History
         <div class="nav-notes-dot" id="nav-notes-dot"></div>
       </button>
-      <button class="nav-btn active" onclick="showPage('log')" id="nav-log"><i class="ti ti-plus-circle"></i>Log</button>
       <button class="nav-btn" onclick="showPage('dashboard')" id="nav-dashboard"><i class="ti ti-chart-bar"></i>Dashboard</button>
       <button class="nav-btn" onclick="showPage('settings')" id="nav-settings"><i class="ti ti-settings"></i>Settings</button>
     </nav>
@@ -1028,7 +1229,7 @@ input,select,textarea{font-size:16px !important}
               <button class="chart-filter" id="ff-attempted" onclick="setFeedFilter('attempted',this)">⚡ Attempted</button>
               <button class="chart-filter" id="ff-all" onclick="setFeedFilter('all',this)">All</button>
             </div>
-            <select class="gran-select" onchange="setGranularity('feed',this.value)"><option value="auto">Auto</option><option value="hour">Hourly</option><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option></select>
+            <select class="gran-select" id="gran-feed" onchange="setGranularity('feed',this.value)"><option value="auto">Auto</option><option value="hour">Hourly</option><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option></select>
           </div>
           <div class="benchmark-legend"><span><span class="legend-dot" style="background:#1D9E75"></span>Baby</span><span><span class="legend-dot" style="background:rgba(255,180,0,.7)"></span>AAP (8–12/day)</span></div>
           <div class="chart-scroll-wrap"><div class="chart-wrap"><canvas id="feedChart"></canvas></div></div>
@@ -1038,7 +1239,7 @@ input,select,textarea{font-size:16px !important}
           <div class="card-title"><i class="ti ti-moon"></i> Sleep per day (hrs) <button class="info-icon" onclick="showInfo('sleep')"><i class="ti ti-info-circle"></i></button></div>
           <div class="chart-controls">
             <div class="chart-filters"></div>
-            <select class="gran-select" onchange="setGranularity('sleep',this.value)"><option value="auto">Auto</option><option value="hour">Hourly</option><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option></select>
+            <select class="gran-select" id="gran-sleep" onchange="setGranularity('sleep',this.value)"><option value="auto">Auto</option><option value="hour">Hourly</option><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option></select>
           </div>
           <div class="benchmark-legend"><span><span class="legend-dot" style="background:#1D9E75"></span>Baby</span><span><span class="legend-dot" style="background:rgba(100,149,237,.6)"></span>NSF (14–17 hrs)</span></div>
           <div class="chart-scroll-wrap"><div class="chart-wrap"><canvas id="sleepChart"></canvas></div></div>
@@ -1053,7 +1254,7 @@ input,select,textarea{font-size:16px !important}
               <button class="chart-filter" id="df-dirty" onclick="setDiaperFilter('dirty',this)">💩 Dirty</button>
               <button class="chart-filter" id="df-both" onclick="setDiaperFilter('both',this)">💧💩 Both</button>
             </div>
-            <select class="gran-select" onchange="setGranularity('diaper',this.value)"><option value="auto">Auto</option><option value="hour">Hourly</option><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option></select>
+            <select class="gran-select" id="gran-diaper" onchange="setGranularity('diaper',this.value)"><option value="auto">Auto</option><option value="hour">Hourly</option><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option></select>
           </div>
           <div class="benchmark-legend"><span><span class="legend-dot" style="background:#1D9E75"></span>Baby</span><span><span class="legend-dot" style="background:rgba(255,120,100,.6)"></span>AAP (6–8/day)</span></div>
           <div class="chart-scroll-wrap"><div class="chart-wrap"><canvas id="diaperChart"></canvas></div></div>
@@ -1123,7 +1324,18 @@ input,select,textarea{font-size:16px !important}
           <button class="seg-btn" onclick="filterHistory('sleep',this)">Sleep</button>
           <button class="seg-btn" onclick="filterHistory('diaper',this)">Diaper</button>
         </div>
-        <div style="font-size:12px;color:var(--muted);font-weight:500;margin-bottom:8px;text-align:center">Tap any entry to expand details</div>
+        <div class="group-bar">
+          <div class="group-hint" id="group-hint">Tap any entry to expand details</div>
+          <button class="group-btn" id="btn-group-mode" onclick="toggleGroupMode()"><i class="ti ti-layers-intersect"></i> Group feedings</button>
+        </div>
+        <div class="group-actionbar" id="group-actionbar" style="display:none">
+          <span id="group-count">0 selected</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <i class="ti ti-help-circle" onclick="openGroupHelp()" style="cursor:pointer;font-size:18px;opacity:.85" title="How grouping works"></i>
+            <button class="group-cancel" onclick="exitGroupMode()">Cancel</button>
+            <button class="group-confirm" id="btn-group-confirm" onclick="groupSelected()" disabled>Group</button>
+          </div>
+        </div>
         <div class="card"><div id="history-list"><div class="empty"><i class="ti ti-notes"></i>No entries yet.</div></div></div>
       </div>
 
@@ -1200,6 +1412,23 @@ input,select,textarea{font-size:16px !important}
     <div class="info-modal-title" id="infoTitle"></div>
     <div class="info-modal-body" id="infoBody"></div>
     <div class="info-modal-source" id="infoSource"></div>
+  </div>
+</div>
+
+<div class="info-overlay" id="groupHelpOverlay" onclick="if(event.target===this)closeGroupHelp()">
+  <div class="info-modal">
+    <button class="info-close" onclick="closeGroupHelp()"><i class="ti ti-x"></i></button>
+    <div class="info-modal-title"><i class="ti ti-layers-intersect"></i> Group feedings into a session</div>
+    <div class="info-modal-body">
+      Babies often feed in clusters. You can combine several feedings into one <strong>feeding session</strong>:
+      <ol style="margin:10px 0 0 18px;line-height:1.85;padding:0">
+        <li><strong>Tap</strong> each feeding you want to combine — a checkmark appears.</li>
+        <li>Select at least <strong>2</strong> feedings.</li>
+        <li>Tap <strong>Group</strong> to merge them.</li>
+      </ol>
+      <div style="margin-top:10px">The session shows the <strong>total amount eaten</strong> and counts as <strong>one feeding</strong> on your dashboard. Ungroup anytime with the <i class="ti ti-layers-off"></i> button on a session. Only feedings can be grouped for now.</div>
+    </div>
+    <button onclick="closeGroupHelp()" style="margin-top:16px;width:100%;background:var(--teal);color:#fff;border:none;border-radius:var(--radius-sm);padding:12px;font-size:14px;font-weight:700;font-family:'Nunito',sans-serif;cursor:pointer">Got it</button>
   </div>
 </div>
 
