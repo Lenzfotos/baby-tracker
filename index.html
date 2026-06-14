@@ -61,6 +61,8 @@ onAuthStateChanged(auth,async user=>{
     else showScreen('onboard');
   }else showScreen('login');
 });
+// Safety net: if auth never resolves (offline / SDK blocked), don't spin forever
+if(!PREVIEW)setTimeout(()=>{const l=document.getElementById('screen-loading');if(l&&l.style.display!=='none')showScreen('login');},10000);
 
 // ── AUTH ─────────────────────────────────────────────────────
 // Handle redirect result on page load (mobile Safari uses redirect not popup)
@@ -182,7 +184,7 @@ function subscribeEntries(){
     renderDebounce=setTimeout(()=>{renderHistory();renderDashboard();updateEntryCount();},80);
   });
 }
-function showScreen(s){['login','onboard','app'].forEach(id=>{const el=document.getElementById('screen-'+id);if(el)el.style.display=id===s?'flex':'none';});}
+function showScreen(s){['loading','login','onboard','app'].forEach(id=>{const el=document.getElementById('screen-'+id);if(el)el.style.display=id===s?'flex':'none';});}
 
 // ── HOUSEHOLD UI ─────────────────────────────────────────────
 function updateHouseholdUI(){
@@ -229,11 +231,13 @@ window.showPage=p=>{
   if(p==='dashboard')requestAnimationFrame(()=>setTimeout(renderDashboard,60));
   if(p==='history')renderHistory();
   if(p==='settings'){updateEntryCount();renderWeightPreview();}
+  if(p==='log')startFeedClock();else stopFeedClock();
 };
 
 // ── FEED TIMER ───────────────────────────────────────────────
 window.startFeedTimer=async()=>{
   if(timerStartTs){showToast('Timer already running');return;}
+  stopFeedClock(); // timing starts now — freeze the live clock so it doesn't overwrite
   timerStartTs=new Date().toISOString();
   document.getElementById('f-start').value=currentTimeStr();
   // Persist to Firebase so if user leaves and comes back timer survives
@@ -282,12 +286,64 @@ window.selectSleepEvent=(el,val)=>{document.querySelectorAll('#sleep-event-row .
 window.selectDiaper=(el,val)=>{document.querySelectorAll('#diaper-type-row .toggle-opt').forEach(x=>x.classList.remove('sel'));el.classList.add('sel');selectedDiaperType=val;const dirty=val!=='Wet';document.getElementById('d-color-row').style.display=dirty?'block':'none';document.getElementById('d-consistency-row').style.display=dirty?'block':'none';};
 window.toggleFeedAttempt=()=>{feedAttempted=!feedAttempted;const box=document.getElementById('f-attempt-box');const icon=document.getElementById('f-attempt-icon');if(box)box.classList.toggle('checked',feedAttempted);if(icon)icon.style.display=feedAttempted?'block':'none';};
 
+// ── FEEDING TIME ⇄ DURATION SYNC ──────────────────────────────
+// Keep start time, end time and duration consistent. The field you edit is the
+// driver; the rule depends on which one changed (programmatic .value= changes,
+// e.g. the timer, don't fire change events so this never loops).
+function fMin(v){if(!v)return null;const p=v.split(':');return (+p[0])*60+(+p[1]);}
+function fTime(t){t=((Math.round(t)%1440)+1440)%1440;return `${String(Math.floor(t/60)).padStart(2,'0')}:${String(t%60).padStart(2,'0')}`;}
+window.feedTimeChanged=src=>{
+  stopFeedClock(); // a manual edit freezes the live clock
+  const sEl=document.getElementById('f-start'),eEl=document.getElementById('f-end'),dEl=document.getElementById('f-duration');
+  if(!sEl||!eEl||!dEl)return;
+  const s=fMin(sEl.value),e=fMin(eEl.value),dur=parseInt(dEl.value);
+  if(src==='start'){
+    if(s==null)return;
+    if(e!=null){
+      const diff=e-s;
+      if(diff>=0)dEl.value=diff;                 // end stays put → duration grows/shrinks
+      else if(dur>0)eEl.value=fTime(s+dur);      // start passed end → keep duration, push end forward
+      else{eEl.value=fTime(s);dEl.value=0;}      // no duration → snap end to the new start
+    }else if(dur>0)eEl.value=fTime(s+dur);       // no end yet → derive it from duration
+  }else if(src==='end'){
+    if(e==null)return;
+    if(s!=null)dEl.value=Math.max(0,e-s);        // start stays put → duration reflects the new end
+    else if(dur>0)sEl.value=fTime(e-dur);        // no start yet → derive it from duration
+  }else{ // duration edited
+    if(!(dur>=0))return;
+    if(s!=null)eEl.value=fTime(s+dur);           // anchor start → push end out by the duration
+    else if(e!=null)sEl.value=fTime(e-dur);      // anchor end → pull start back
+  }
+};
+
 function setDefaultTimes(){
   const ds=todayStr(),ts=currentTimeStr();
   ['f-date','s-date','d-date'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=ds;});
   ['f-start','f-end','s-time','d-time'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=ts;});
 }
+
+// ── LIVE FEEDING CLOCK ────────────────────────────────────────
+// While the feeding form is untouched, keep its start/end on the live clock.
+// Touching (focusing) any time/duration field freezes the form; it resumes the
+// next time the Log tab opens or after an entry is logged.
+let feedClockTimer=null;
+function startFeedClock(){
+  stopFeedClock();
+  const tick=()=>{
+    const t=currentTimeStr();
+    const d=document.getElementById('f-date');if(d)d.value=todayStr();
+    const s=document.getElementById('f-start');if(s)s.value=t;
+    const e=document.getElementById('f-end');if(e)e.value=t;
+    const dur=document.getElementById('f-duration');if(dur)dur.value='';
+  };
+  tick();
+  feedClockTimer=setInterval(tick,10000);
+}
+function stopFeedClock(){if(feedClockTimer){clearInterval(feedClockTimer);feedClockTimer=null;}}
+window.stopFeedClock=stopFeedClock;
+
 setDefaultTimes();
+startFeedClock();
 
 window.logEntry=async type=>{
   if(!householdId){showToast('Not connected');return;}
@@ -335,6 +391,7 @@ window.logEntry=async type=>{
     (ids[type]||[]).forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
     if(type==='feeding'){feedAttempted=false;const box=document.getElementById('f-attempt-box');const icon=document.getElementById('f-attempt-icon');if(box)box.classList.remove('checked');if(icon)icon.style.display='none';}
     setDefaultTimes();
+    startFeedClock(); // resume live ticking after an entry is logged
   }catch(e){showToast('Error: '+e.message);}
   btn.disabled=false;btn.innerHTML=`<i class="ti ti-device-floppy"></i> Log ${type.charAt(0).toUpperCase()+type.slice(1)}`;
 };
@@ -360,7 +417,7 @@ async function renderWeightPreview(){
 
 // ── HISTORY ──────────────────────────────────────────────────
 window.filterHistory=(f,el)=>{histFilter=f;document.querySelectorAll('#page-history .seg-btn').forEach(x=>x.classList.remove('active'));el.classList.add('active');renderHistory();};
-const HIST_ICONS={feeding:'ti-tool-kitchen-2',sleep:'ti-moon',diaper:'ti-droplet'};
+const HIST_ICONS={feeding:'ti-baby-bottle',sleep:'ti-moon',diaper:'ti-droplet'};
 function ozOf(e){const m=String(e.sub||'').match(/^([\d.]+)\s*oz/);return m?parseFloat(m[1]):(parseFloat(e.amount)||0);}
 function fmtOz(n){return n%1?n.toFixed(1):String(n);}
 // Count feedings treating each group as a single feeding
@@ -479,7 +536,7 @@ window.toggleFlag=async(docId,current)=>{await updateDoc(doc(db,'households',hou
 window.openEdit=docId=>{
   const e=localEntries.find(x=>x.docId===docId);if(!e)return;
   editDocId=docId;
-  const icons={feeding:'ti-tool-kitchen-2',sleep:'ti-moon',diaper:'ti-droplet'};
+  const icons={feeding:'ti-baby-bottle',sleep:'ti-moon',diaper:'ti-droplet'};
   const types={feeding:'Feeding',sleep:'Sleep',diaper:'Diaper'};
   document.getElementById('editModalTitle').innerHTML=`<i class="ti ${icons[e.type]}"></i> Edit ${types[e.type]||'Entry'}`;
   const d=new Date(e.ts);
@@ -822,7 +879,7 @@ function exportCSV(data){let csv='';['feeding','sleep','diaper'].forEach(cat=>{i
 function exportPDF(data){const bn=householdData?.babyName||'Baby';const feeds=data.filter(e=>e.type==='feeding'&&!e.attempted),diapers=data.filter(e=>e.type==='diaper');const totalOz=feeds.reduce((s,e)=>{const m=String(e.sub||'').match(/^([\d.]+)\s*oz/);return s+(m?parseFloat(m[1]):0);},0);const totalMins=feeds.reduce((s,e)=>s+(Number(e.duration)||0),0);let rows='';data.forEach(e=>{const d=new Date(e.ts);rows+=`<tr><td>${{feeding:'🍼',sleep:'😴',diaper:'💧'}[e.type]||''}</td><td>${d.toLocaleDateString()}</td><td>${fmtTime(e.ts)}</td><td>${e.label}</td><td>${[e.sub,e.notes].filter(Boolean).join(' · ')}</td><td>${e.loggedBy||'—'}</td></tr>`;});const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>${bn} Tracker</title><style>body{font-family:Arial,sans-serif;color:#1a2e35;padding:30px}h1{color:#1D9E75}.box{display:inline-block;background:#E1F5EE;border-radius:8px;padding:12px 20px;margin:4px;text-align:center}.v{font-size:22px;font-weight:700;color:#1D9E75}.l{font-size:10px;color:#085041;text-transform:uppercase}table{width:100%;border-collapse:collapse;font-size:12px;margin-top:16px}th{background:#1D9E75;color:#fff;padding:8px}td{padding:7px 8px;border-bottom:1px solid #c8e6de}tr:nth-child(even)td{background:#f0f7f5}@media print{button{display:none}}</style></head><body><h1>${bn}'s Tracker</h1><p style="color:#6b8a92;font-size:13px">Generated ${new Date().toLocaleString()}</p><div style="margin:16px 0"><div class="box"><div class="v">${feeds.length}</div><div class="l">Feedings</div></div><div class="box"><div class="v">${totalOz>0?totalOz.toFixed(1):'—'}</div><div class="l">Oz</div></div><div class="box"><div class="v">${totalMins>0?minToHM(totalMins):'—'}</div><div class="l">Feed time</div></div><div class="box"><div class="v">${diapers.length}</div><div class="l">Diapers</div></div></div><table><thead><tr><th></th><th>Date</th><th>Time</th><th>Event</th><th>Details</th><th>By</th></tr></thead><tbody>${rows}</tbody></table><script>window.onload=()=>window.print()<\/script></body></html>`;const w=window.open('','_blank');w.document.write(html);w.document.close();showToast('PDF ready — Print to save!');}
 
 // ── INFO MODAL ───────────────────────────────────────────────
-const INFO_DATA={feeding:{icon:'ti-tool-kitchen-2',title:'Feeding Benchmark',body:`<strong>Target: 8–12 feedings per day</strong> for newborns (0–3 months).<br><br>The AAP recommends feeding on demand — typically every 1.5–3 hours for breastfed and every 2–4 hours for formula-fed newborns. Feeding duration of 10–20 minutes per breast is typical.`,source:`Source: AAP — <a href="https://www.healthychildren.org/English/ages-stages/baby/feeding-nutrition/Pages/How-Often-and-How-Much-Should-Your-Baby-Eat.aspx" target="_blank">How Often and How Much Should Your Baby Eat?</a>`},sleep:{icon:'ti-moon',title:'Sleep Benchmark',body:`<strong>Target: 14–17 hours per day</strong> for newborns (0–3 months).<br><br>The NSF recommends 14–17 hours of total sleep per 24 hours for newborns, spread across multiple periods.`,source:`Source: NSF — <a href="https://www.sleepfoundation.org/how-sleep-works/how-much-sleep-do-we-really-need" target="_blank">How Much Sleep Do We Really Need?</a>`},diaper:{icon:'ti-droplet',title:'Diaper Benchmark',body:`<strong>Target: 6–8 wet diapers per day</strong> after the first week. This is the AAP's key indicator of adequate hydration and feeding.`,source:`Source: AAP — <a href="https://www.healthychildren.org/English/ages-stages/baby/feeding-nutrition/Pages/Wet-Diapers-and-Newborn-Urine-Output.aspx" target="_blank">Wet Diapers and Newborn Urine Output</a>`},weight:{icon:'ti-barbell',title:'Growth Chart',body:`<strong>WHO Child Growth Standards</strong> — 10th, 50th, and 90th percentile bands.<br><br>The shaded band covers 80% of healthy babies. Being outside does not necessarily indicate a problem — discuss with your pediatrician.`,source:`Source: WHO — <a href="https://www.who.int/tools/child-growth-standards/standards/weight-for-age" target="_blank">WHO Child Growth Standards</a>`}};
+const INFO_DATA={feeding:{icon:'ti-baby-bottle',title:'Feeding Benchmark',body:`<strong>Target: 8–12 feedings per day</strong> for newborns (0–3 months).<br><br>The AAP recommends feeding on demand — typically every 1.5–3 hours for breastfed and every 2–4 hours for formula-fed newborns. Feeding duration of 10–20 minutes per breast is typical.`,source:`Source: AAP — <a href="https://www.healthychildren.org/English/ages-stages/baby/feeding-nutrition/Pages/How-Often-and-How-Much-Should-Your-Baby-Eat.aspx" target="_blank">How Often and How Much Should Your Baby Eat?</a>`},sleep:{icon:'ti-moon',title:'Sleep Benchmark',body:`<strong>Target: 14–17 hours per day</strong> for newborns (0–3 months).<br><br>The NSF recommends 14–17 hours of total sleep per 24 hours for newborns, spread across multiple periods.`,source:`Source: NSF — <a href="https://www.sleepfoundation.org/how-sleep-works/how-much-sleep-do-we-really-need" target="_blank">How Much Sleep Do We Really Need?</a>`},diaper:{icon:'ti-droplet',title:'Diaper Benchmark',body:`<strong>Target: 6–8 wet diapers per day</strong> after the first week. This is the AAP's key indicator of adequate hydration and feeding.`,source:`Source: AAP — <a href="https://www.healthychildren.org/English/ages-stages/baby/feeding-nutrition/Pages/Wet-Diapers-and-Newborn-Urine-Output.aspx" target="_blank">Wet Diapers and Newborn Urine Output</a>`},weight:{icon:'ti-barbell',title:'Growth Chart',body:`<strong>WHO Child Growth Standards</strong> — 10th, 50th, and 90th percentile bands.<br><br>The shaded band covers 80% of healthy babies. Being outside does not necessarily indicate a problem — discuss with your pediatrician.`,source:`Source: WHO — <a href="https://www.who.int/tools/child-growth-standards/standards/weight-for-age" target="_blank">WHO Child Growth Standards</a>`}};
 window.showInfo=type=>{const d=INFO_DATA[type];if(!d)return;document.getElementById('infoTitle').innerHTML=`<i class="ti ${d.icon}"></i> ${d.title}`;document.getElementById('infoBody').innerHTML=d.body;document.getElementById('infoSource').innerHTML=d.source;document.getElementById('infoOverlay').classList.add('show');document.body.style.overflow='hidden';};
 window.closeInfo=e=>{if(e&&e.target!==document.getElementById('infoOverlay'))return;document.getElementById('infoOverlay').classList.remove('show');document.body.style.overflow='';};
 window.clearLocalData=()=>showToast('Data is in Firebase — delete from History instead.');
@@ -833,7 +890,7 @@ window.clearLocalData=()=>showToast('Data is in Firebase — delete from History
 body{font-family:'Nunito',sans-serif;background:#EDF7F4;color:#1a2e35;min-height:100vh;-webkit-font-smoothing:antialiased}
 /* Prevent iOS zoom on any input */
 input,select,textarea{font-size:16px !important}
-:root{--teal:#1D9E75;--teal-light:#E1F5EE;--teal-mid:#9FE1CB;--teal-dark:#085041;--white:#fff;--gray:#f0f7f5;--text:#1a2e35;--muted:#6b8a92;--border:#c8e6de;--radius:16px;--radius-sm:11px;--sidebar:220px}
+:root{--teal:#1D9E75;--teal-light:#E1F5EE;--teal-mid:#9FE1CB;--teal-dark:#085041;--white:#fff;--gray:#f0f7f5;--text:#1a2e35;--muted:#6b8a92;--border:#c8e6de;--radius:16px;--radius-sm:11px;--sidebar:220px;--ctl-h:44px}
 .screen{display:none;min-height:100vh;flex-direction:column;align-items:center;justify-content:center;padding:24px}
 #screen-login{background:linear-gradient(160deg,#E1F5EE 0%,#d4f0e8 100%)}
 #screen-onboard{background:linear-gradient(160deg,#E1F5EE 0%,#d4f0e8 100%);justify-content:flex-start;padding-top:40px;overflow-y:auto}
@@ -882,6 +939,9 @@ input,select,textarea{font-size:16px !important}
 .form-input{width:100%;padding:11px 13px;border:1.5px solid var(--border);border-radius:var(--radius-sm);color:var(--text);background:var(--gray);outline:none;font-family:'Nunito',sans-serif;font-weight:500;appearance:none;-webkit-appearance:none;transition:border .15s}
 .form-input:focus{border-color:var(--teal);background:#fff}
 .form-input:disabled{opacity:.6;cursor:not-allowed}
+/* Uniform height for all form fields, dropdowns and buttons (box-sizing:border-box is global, so borders don't change the rendered height) */
+.form-input,.gran-select,.toggle-opt,.seg-btn,.range-pill,.chart-filter,.submit-btn,.timer-btn,.google-btn,.group-btn,.group-confirm,.group-cancel,.edit-save-btn,.edit-delete-btn,.export-btn{height:var(--ctl-h);line-height:normal}
+.toggle-opt{display:inline-flex;align-items:center;justify-content:center}
 .form-row-2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .form-row-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
 .submit-btn{width:100%;padding:14px;background:var(--teal);color:#fff;border:none;border-radius:var(--radius-sm);font-size:15px;font-weight:700;cursor:pointer;margin-top:6px;display:flex;align-items:center;justify-content:center;gap:8px;transition:opacity .2s;font-family:'Nunito',sans-serif}
@@ -1005,6 +1065,7 @@ input,select,textarea{font-size:16px !important}
 .config-note{font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:14px;font-weight:500}
 .config-note a{color:var(--teal);font-weight:600}
 .spinner{width:16px;height:16px;border:2.5px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:inline-block}
+.load-spin{width:30px;height:30px;border:3px solid var(--teal-mid);border-top-color:var(--teal);border-radius:50%;animation:spin .7s linear infinite;margin-top:18px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--teal-dark);color:#fff;padding:13px 24px;border-radius:30px;font-size:14px;font-weight:600;display:none;z-index:999;white-space:nowrap;box-shadow:0 4px 20px rgba(8,80,65,.3);font-family:'Nunito',sans-serif}
 .toast.show{display:block;animation:slideup .3s ease}
@@ -1038,12 +1099,21 @@ input,select,textarea{font-size:16px !important}
   @keyframes slideUpM{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
   @keyframes slideup{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
 }
+/* Buttons & pill dropdowns: 12px radius so they don't look like blobs. Input fields keep their own radius. */
+.gran-select,.toggle-opt,.seg-btn,.range-pill,.chart-filter,.submit-btn,.timer-btn,.google-btn,.group-btn,.group-confirm,.group-cancel,.edit-save-btn,.edit-delete-btn,.export-btn{border-radius:12px}
 </style>
 </head>
 <body>
 
 <!-- LOGIN -->
-<div id="screen-login" class="screen" style="display:flex">
+<!-- LOADING SPLASH (shown until Firebase resolves the saved session, so the
+     login screen never flashes for users who are already signed in) -->
+<div id="screen-loading" class="screen" style="display:flex;background:linear-gradient(160deg,#E1F5EE 0%,#d4f0e8 100%)">
+  <div class="auth-logo"><i class="ti ti-heart"></i></div>
+  <div class="load-spin"></div>
+</div>
+
+<div id="screen-login" class="screen" style="display:none">
   <div class="auth-card">
     <div class="auth-logo"><i class="ti ti-heart"></i></div>
     <div class="auth-title">Baby Tracker</div>
@@ -1121,11 +1191,11 @@ input,select,textarea{font-size:16px !important}
         <div class="log-grid">
           <!-- Feeding -->
           <div class="card">
-            <div class="card-title"><i class="ti ti-tool-kitchen-2"></i> Feeding</div>
+            <div class="card-title"><i class="ti ti-baby-bottle"></i> Feeding</div>
             <div class="form-row"><label class="form-label">Date</label><input class="form-input" type="date" id="f-date"/></div>
             <div class="form-row-2">
-              <div class="form-row"><label class="form-label">Start time</label><input class="form-input" type="time" id="f-start"/></div>
-              <div class="form-row"><label class="form-label">End time</label><input class="form-input" type="time" id="f-end"/></div>
+              <div class="form-row"><label class="form-label">Start time</label><input class="form-input" type="time" id="f-start" onfocus="stopFeedClock()" onchange="feedTimeChanged('start')"/></div>
+              <div class="form-row"><label class="form-label">End time</label><input class="form-input" type="time" id="f-end" onfocus="stopFeedClock()" onchange="feedTimeChanged('end')"/></div>
             </div>
             <!-- Timer -->
             <div id="timer-display" class="timer-display"></div>
@@ -1140,7 +1210,7 @@ input,select,textarea{font-size:16px !important}
             <div class="form-row"><label class="check-label" onclick="toggleFeedAttempt()"><div class="check-box" id="f-attempt-box"><i class="ti ti-check" id="f-attempt-icon" style="display:none;font-size:13px;color:#fff"></i></div><span>Attempted feed (refused / didn't latch)</span></label></div>
             <div class="form-row-2">
               <div class="form-row"><label class="form-label">Amount (oz)</label><input class="form-input" type="number" id="f-amount" placeholder="e.g. 2.5" step="0.5" min="0"/></div>
-              <div class="form-row"><label class="form-label">Duration (min)</label><input class="form-input" type="number" id="f-duration" placeholder="auto-calc" min="0"/></div>
+              <div class="form-row"><label class="form-label">Duration (min)</label><input class="form-input" type="number" id="f-duration" placeholder="auto-calc" min="0" onfocus="stopFeedClock()" onchange="feedTimeChanged('duration')"/></div>
             </div>
             <div class="form-row"><label class="form-label">Notes</label><input class="form-input" type="text" id="f-notes" placeholder="e.g. fussy"/></div>
             <button class="submit-btn" onclick="logEntry('feeding')" id="btn-feeding"><i class="ti ti-device-floppy"></i> Log Feeding</button>
@@ -1216,7 +1286,7 @@ input,select,textarea{font-size:16px !important}
         </div>
 
         <div class="card">
-          <div class="card-title"><i class="ti ti-chart-line"></i> Feedings per day <button class="info-icon" onclick="showInfo('feeding')"><i class="ti ti-info-circle"></i></button></div>
+          <div class="card-title"><i class="ti ti-baby-bottle"></i> Feedings per day <button class="info-icon" onclick="showInfo('feeding')"><i class="ti ti-info-circle"></i></button></div>
           <div class="chart-controls">
             <div class="chart-filters">
               <button class="chart-filter active" id="ff-actual" onclick="setFeedFilter('actual',this)">✓ Actual</button>
@@ -1298,7 +1368,7 @@ input,select,textarea{font-size:16px !important}
           <div class="divider"></div>
           <div class="form-label" style="margin-bottom:8px">Categories</div>
           <div class="category-check-row">
-            <div class="cat-check sel" onclick="toggleCatCheck(this,'feeding')"><i class="ti ti-tool-kitchen-2"></i> Feeding</div>
+            <div class="cat-check sel" onclick="toggleCatCheck(this,'feeding')"><i class="ti ti-baby-bottle"></i> Feeding</div>
             <div class="cat-check sel" onclick="toggleCatCheck(this,'sleep')"><i class="ti ti-moon"></i> Sleep</div>
             <div class="cat-check sel" onclick="toggleCatCheck(this,'diaper')"><i class="ti ti-droplet"></i> Diaper</div>
           </div>
