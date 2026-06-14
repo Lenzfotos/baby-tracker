@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <script type="module">
 import{initializeApp}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import{getAuth,GoogleAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,signOut,onAuthStateChanged,setPersistence,browserLocalPersistence}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import{getAuth,GoogleAuthProvider,OAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,signOut,onAuthStateChanged,setPersistence,browserLocalPersistence,signInWithEmailAndPassword,createUserWithEmailAndPassword,sendPasswordResetEmail}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import{getFirestore,doc,setDoc,getDoc,addDoc,updateDoc,deleteDoc,collection,query,onSnapshot,orderBy,getDocs}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const firebaseConfig={apiKey:"AIzaSyCWgep90LXLN3VhMeZx2IdJHfo4ut8JROc",authDomain:"baby-tracker-f1eed.firebaseapp.com",projectId:"baby-tracker-f1eed",storageBucket:"baby-tracker-f1eed.firebasestorage.app",messagingSenderId:"1071084232072",appId:"1:1071084232072:web:409cdfd67509792618ee3d"};
@@ -17,6 +17,7 @@ const app=initializeApp(firebaseConfig);
 const auth=getAuth(app);
 const db=getFirestore(app);
 const provider=new GoogleAuthProvider();
+const appleProvider=new OAuthProvider('apple.com');
 
 // ── UTILS (single source of truth for dates) ──────────────────
 function localDateStr(d=new Date()){return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
@@ -105,7 +106,11 @@ function genPreviewEntries(){
       out.push(mk(day,h,0,{type:'feeding',label:i%2?'Bottle – Formula':'Breastmilk – Both sides',amount:String(oz),sub:oz+' oz',duration:16+Math.round(Math.random()*12),tsEnd:end.toISOString(),attempted:false}));
     });
     [7,11,14,17,20,23].forEach((h,i)=>{const t=i%3===0?'Dirty':'Wet';out.push(mk(day,h,15,{type:'diaper',label:t+' diaper',sub:t==='Dirty'?'Yellow':'',consistency:t==='Dirty'?'Seedy':''}));});
-    [13,19,1].forEach(h=>out.push(mk(day,h,30,{type:'sleep',label:'Fell asleep',sub:'Crib',quality:'Good'})));
+    // sleep as fell-asleep → woke-up pairs (~13 h/day)
+    [[0,0,6,0],[9,0,10,30],[13,0,15,0],[19,0,22,30]].forEach(([sh,sm,eh,em])=>{
+      out.push(mk(day,sh,sm,{type:'sleep',label:'Fell asleep',sub:'Crib',quality:'Good'}));
+      out.push(mk(day,eh,em,{type:'sleep',label:'Woke up',sub:'Crib'}));
+    });
   }
   return out.sort((a,b)=>new Date(b.ts)-new Date(a.ts));
 }
@@ -116,6 +121,7 @@ function enterPreview(){
   isOwner=true;
   membersList=Object.entries(householdData.members).map(([uid,d])=>({uid,...d}));
   localEntries=genPreviewEntries();
+  latestWeightLb=15; // sample weight so the intake target shows in preview
   showScreen('app');
   updateHouseholdUI();
   renderHistory();
@@ -124,9 +130,72 @@ function enterPreview(){
   showToast('👀 Preview mode — sample data, nothing is saved');
 }
 
+// ── EMAIL / PASSWORD + APPLE ──────────────────────────────────
+let authMode='signin'; // 'signin' | 'signup'
+function authError(msg){const el=document.getElementById('auth-error');if(el)el.textContent=msg||'';}
+function friendlyAuthError(e){
+  const m={
+    "auth/invalid-credential":"Incorrect email or password.",
+    "auth/wrong-password":"Incorrect email or password.",
+    "auth/user-not-found":"Incorrect email or password.",
+    "auth/invalid-email":"That email address looks invalid.",
+    "auth/email-already-in-use":"An account with this email already exists — try signing in.",
+    "auth/weak-password":"Password must be at least 6 characters.",
+    "auth/missing-password":"Please enter your password.",
+    "auth/too-many-requests":"Too many attempts. Please wait a moment and try again.",
+    "auth/operation-not-allowed":"This sign-in method is not enabled yet (enable it in Firebase).",
+    "auth/popup-blocked":"Popup blocked — allow popups and try again."
+  };
+  return m[e.code]||("Something went wrong ("+(e.code||"error")+").");
+}
+function toggleAuthMode(){
+  authMode=authMode==='signin'?'signup':'signin';
+  const btn=document.getElementById('btn-email-auth');if(btn)btn.textContent=authMode==='signin'?'Sign in':'Create account';
+  const tg=document.getElementById('auth-toggle');if(tg)tg.textContent=authMode==='signin'?'Create account':'Have an account? Sign in';
+  const p=document.getElementById('auth-pass');if(p)p.setAttribute('autocomplete',authMode==='signin'?'current-password':'new-password');
+  authError('');
+}
+async function emailAuth(){
+  if(location.protocol==='file:'){authError('Open this page via http://localhost, not the file directly.');return;}
+  const email=(document.getElementById('auth-email')?.value||'').trim();
+  const pass=document.getElementById('auth-pass')?.value||'';
+  authError('');
+  if(!email){authError('Please enter your email.');return;}
+  if(!pass){authError('Please enter your password.');return;}
+  const btn=document.getElementById('btn-email-auth');const orig=btn.textContent;btn.disabled=true;btn.innerHTML='<span class="spinner"></span>';
+  try{
+    if(authMode==='signin')await signInWithEmailAndPassword(auth,email,pass);
+    else await createUserWithEmailAndPassword(auth,email,pass);
+    // onAuthStateChanged routes onward from here
+  }catch(e){authError(friendlyAuthError(e));btn.disabled=false;btn.textContent=orig;}
+}
+async function resetPassword(){
+  const email=(document.getElementById('auth-email')?.value||'').trim();
+  if(!email){authError('Enter your email above, then tap Forgot password.');return;}
+  try{await sendPasswordResetEmail(auth,email);authError('');showToast('Password reset email sent to '+email);}
+  catch(e){authError(friendlyAuthError(e));}
+}
+async function signInApple(){
+  if(location.protocol==='file:'){authError('Open this page via http://localhost, not the file directly.');return;}
+  authError('');
+  try{await signInWithPopup(auth,appleProvider);}
+  catch(e){
+    if(['auth/popup-blocked','auth/operation-not-supported-in-this-environment','auth/cancelled-popup-request'].includes(e.code)){
+      try{await signInWithRedirect(auth,appleProvider);return;}catch(e2){e=e2;}
+    }
+    if(e.code==='auth/popup-closed-by-user')return;
+    authError(friendlyAuthError(e));console.error('Apple sign-in error:',e);
+  }
+}
+
 // Attach all button handlers via JS (not onclick attrs) to avoid module scope issues
 document.addEventListener('DOMContentLoaded',()=>{
   document.getElementById('btn-google')?.addEventListener('click',signInGoogle);
+  document.getElementById('btn-apple')?.addEventListener('click',signInApple);
+  document.getElementById('btn-email-auth')?.addEventListener('click',emailAuth);
+  document.getElementById('auth-toggle')?.addEventListener('click',toggleAuthMode);
+  document.getElementById('auth-forgot')?.addEventListener('click',resetPassword);
+  document.getElementById('auth-pass')?.addEventListener('keydown',ev=>{if(ev.key==='Enter')emailAuth();});
   document.getElementById('btn-create-hh')?.addEventListener('click',()=>createHousehold());
   document.getElementById('btn-join-hh')?.addEventListener('click',()=>joinHousehold());
   if(PREVIEW)enterPreview();
@@ -656,7 +725,7 @@ function autoGranularity(mode){
   return'month';
 }
 
-function buildBuckets(from,to,granularity,entryFilter){
+function buildBuckets(from,to,granularity,entryFilter,source=localEntries){
   const buckets=[],labels=[];
   if(granularity==='hour'){
     // Hourly across every day in the range (24 buckets per day). For multi-day
@@ -675,7 +744,7 @@ function buildBuckets(from,to,granularity,entryFilter){
           else if(h===6)label='6a';else if(h===12)label='12p';else if(h===18)label='6p';else label='';
         }else label=h===0?'12am':h<12?`${h}am`:h===12?'12pm':`${h-12}pm`;
         labels.push(label);
-        buckets.push(localEntries.filter(e=>entryFilter(e)&&localKey(e.ts)===dk&&new Date(e.ts).getHours()===h));
+        buckets.push(source.filter(e=>entryFilter(e)&&localKey(e.ts)===dk&&new Date(e.ts).getHours()===h));
       }
     }
   }else if(granularity==='day'){
@@ -684,7 +753,7 @@ function buildBuckets(from,to,granularity,entryFilter){
       const d=new Date(from.getFullYear(),from.getMonth(),from.getDate()+i);
       const dk=localKey(d);
       labels.push(d.toLocaleDateString([],{month:'short',day:'numeric'}));
-      buckets.push(localEntries.filter(e=>entryFilter(e)&&localKey(e.ts)===dk));
+      buckets.push(source.filter(e=>entryFilter(e)&&localKey(e.ts)===dk));
     }
   }else if(granularity==='week'){
     // Rolling 7-day weeks across the whole range, each labeled by its start date
@@ -692,18 +761,72 @@ function buildBuckets(from,to,granularity,entryFilter){
     for(let ws=new Date(start);ws<=to;ws=new Date(ws.getFullYear(),ws.getMonth(),ws.getDate()+7)){
       const we=new Date(ws.getFullYear(),ws.getMonth(),ws.getDate()+6,23,59,59);
       labels.push(ws.toLocaleDateString([],{month:'short',day:'numeric'}));
-      buckets.push(localEntries.filter(e=>entryFilter(e)&&new Date(e.ts)>=ws&&new Date(e.ts)<=we));
+      buckets.push(source.filter(e=>entryFilter(e)&&new Date(e.ts)>=ws&&new Date(e.ts)<=we));
     }
   }else{// month
     let cur=new Date(from.getFullYear(),from.getMonth(),1);
     while(cur<=to){
       const me=new Date(cur.getFullYear(),cur.getMonth()+1,0,23,59,59);
       labels.push(cur.toLocaleDateString([],{month:'short',year:'2-digit'}));
-      buckets.push(localEntries.filter(e=>entryFilter(e)&&new Date(e.ts)>=cur&&new Date(e.ts)<=me));
+      buckets.push(source.filter(e=>entryFilter(e)&&new Date(e.ts)>=cur&&new Date(e.ts)<=me));
       cur=new Date(cur.getFullYear(),cur.getMonth()+1,1);
     }
   }
   return{labels,buckets};
+}
+
+// ── AGE / WEIGHT-AWARE BENCHMARKS ─────────────────────────────
+// General pediatric guidance (AAP / NSF) that shifts with the baby's age and
+// weight. Falls back to newborn values when DOB/weight aren't set. Educational
+// context only — the info popups keep the "discuss with your pediatrician" note.
+let latestWeightLb=null; // most recent logged weight in pounds (for the intake target)
+function babyAgeMonths(at=new Date()){
+  if(!householdData?.dob)return null;
+  const dob=new Date(householdData.dob);if(isNaN(dob))return null;
+  return (at-dob)/(86400000*30.4375);
+}
+function ageString(){
+  const m=babyAgeMonths();if(m==null)return null;
+  if(m<1){const w=Math.max(0,Math.round(m*4.345));return `${w} week${w===1?'':'s'} old`;}
+  const mo=Math.round(m);return `${mo} month${mo===1?'':'s'} old`;
+}
+function feedBench(){
+  const m=babyAgeMonths();
+  if(m==null||m<1)return{min:8,max:12};
+  if(m<3)return{min:7,max:9};
+  if(m<6)return{min:5,max:7};
+  if(m<9)return{min:4,max:6};
+  if(m<12)return{min:3,max:5};
+  return{min:3,max:4};
+}
+function sleepBench(){
+  const m=babyAgeMonths();
+  if(m==null||m<4)return{min:14,max:17};
+  if(m<12)return{min:12,max:15};
+  if(m<24)return{min:11,max:14};
+  return{min:10,max:13};
+}
+function ozTarget(){return latestWeightLb>0?Math.min(32,Math.round(2.5*latestWeightLb)):null;}
+function updateOzTarget(){
+  const el=document.getElementById('oz-target');if(!el)return;
+  const t=ozTarget();
+  if(t){el.textContent=`target ~${t} oz/day`;el.style.display='block';}
+  else{el.textContent='';el.style.display='none';}
+}
+
+// Pair "Fell asleep" → next "Woke up" into sleep sessions with a duration
+function buildSleepSessions(){
+  const sleeps=localEntries.filter(e=>e.type==='sleep').slice().sort((a,b)=>new Date(a.ts)-new Date(b.ts));
+  const sessions=[];let openStart=null;
+  for(const e of sleeps){
+    if(e.label==='Fell asleep')openStart=new Date(e.ts);
+    else if(e.label==='Woke up'&&openStart){
+      const end=new Date(e.ts),mins=Math.round((end-openStart)/60000);
+      if(mins>0&&mins<2880)sessions.push({start:openStart,end,mins}); // ignore <0 or >48h
+      openStart=null;
+    }
+  }
+  return sessions;
 }
 
 function renderDashboard(){
@@ -722,7 +845,11 @@ function renderDashboard(){
   document.getElementById('stat-feeds').textContent=feedCount||'0';
   document.getElementById('stat-oz').textContent=totalOz>0?totalOz.toFixed(1):'—';
   document.getElementById('stat-diapers').textContent=diapers.length||'0';
-  document.getElementById('stat-sleep').textContent='—';
+  // Sleep hours from paired fell-asleep→woke-up sessions (attributed to their start)
+  const sleepSessions=buildSleepSessions();
+  const sleepUnits=sleepSessions.map(s=>({ts:s.start.toISOString(),type:'sleepSession',hrs:s.mins/60}));
+  const sleepMins=sleepSessions.filter(s=>s.start>=from&&s.start<=to).reduce((a,s)=>a+s.mins,0);
+  document.getElementById('stat-sleep').textContent=sleepMins>0?minToHM(sleepMins):'—';
 
   // Feed time stat
   const ftEl=document.getElementById('stat-feed-time');
@@ -748,20 +875,21 @@ function renderDashboard(){
   const teal='#1D9E75';
   const isToday=mode==='today';
 
-  function buildChart(canvasId,granularityState,entryFilterFn,benchMin,benchMax,benchColor,benchFillColor,isLine){
+  function buildChart(canvasId,granularityState,entryFilterFn,benchMin,benchMax,benchColor,benchFillColor,isLine,valueFn,source){
     let gran=granularityState==='auto'?autoGranularity(mode):granularityState;
     // Hourly stays readable up to ~2 weeks; past that it's too dense, so fall back to daily.
     const MAX_HOURLY_DAYS=14;
     const rangeDays=Math.round((to-from)/86400000); // inclusive day-span ('to' is 23:59:59)
     if(gran==='hour'&&rangeDays>MAX_HOURLY_DAYS)gran='day';
-    const{labels,buckets}=buildBuckets(from,to,gran,entryFilterFn);
+    const{labels,buckets}=buildBuckets(from,to,gran,entryFilterFn,source||localEntries);
     const isHour=gran==='hour';
     const isMultiDayHour=isHour&&rangeDays>1;
+    // Per-bucket value: feeds/diapers count entries (grouped feeds as one); sleep sums hours.
+    const val=valueFn||countFeedingUnits;
     // Cumulative within each day (resets at every midnight = each 24th bucket).
-    // countFeedingUnits collapses grouped feedings to one; others count individually.
     let data;
-    if(isHour){let cum=0;data=buckets.map((b,i)=>{if(i%24===0)cum=0;cum+=countFeedingUnits(b);return cum;});}
-    else data=buckets.map(countFeedingUnits);
+    if(isHour){let cum=0;data=buckets.map((b,i)=>{if(i%24===0)cum=0;cum+=val(b);return cum;});}
+    else data=buckets.map(val);
     // Benchmarks ramp 0→target across each day, resetting daily for hourly views
     const bMin=isHour?labels.map((_,i)=>parseFloat((benchMin*((i%24)+1)/24).toFixed(1))):labels.map(()=>benchMin);
     const bMax=isHour?labels.map((_,i)=>parseFloat((benchMax*((i%24)+1)/24).toFixed(1))):labels.map(()=>benchMax);
@@ -821,8 +949,12 @@ function renderDashboard(){
     return true;
   }
 
-  buildChart('feedChart',feedGranularity,feedFilter,8,12,'rgba(255,180,0,0.6)','rgba(255,200,0,0.08)',true);
-  buildChart('sleepChart',sleepGranularity,e=>e.type==='sleep',14,17,'rgba(100,149,237,0.6)','rgba(100,149,237,0.08)',false);
+  const fb=feedBench(),sb=sleepBench();
+  const fl=document.getElementById('feed-bench-label');if(fl)fl.textContent=`AAP (${fb.min}–${fb.max}/day)`;
+  const sl=document.getElementById('sleep-bench-label');if(sl)sl.textContent=`NSF (${sb.min}–${sb.max} hrs)`;
+  updateOzTarget();
+  buildChart('feedChart',feedGranularity,feedFilter,fb.min,fb.max,'rgba(255,180,0,0.6)','rgba(255,200,0,0.08)',true);
+  buildChart('sleepChart',sleepGranularity,e=>e.type==='sleepSession',sb.min,sb.max,'rgba(100,149,237,0.6)','rgba(100,149,237,0.08)',false,b=>Math.round(b.reduce((s,e)=>s+(e.hrs||0),0)*10)/10,sleepUnits);
   buildChart('diaperChart',diaperGranularity,diaperFilter,6,8,'rgba(255,120,100,0.6)','rgba(255,120,100,0.08)',false);
   renderWeightChart();
 }
@@ -836,6 +968,8 @@ function iWHO(wks,vals,t){if(t<=wks[0])return vals[0];if(t>=wks[wks.length-1])re
 
 async function renderWeightChart(){
   const weights=await getWeights();
+  // weights are sorted newest-first; cache the latest for the intake target
+  if(weights.length){latestWeightLb=weights[0].totalOz/16;updateOzTarget();}
   const daysBack=weightRange==='week'?7:weightRange==='month'?30:weightRange==='6mo'?182:365;
   const cutoff=new Date(Date.now()-daysBack*86400000);
   const entries=weights.filter(e=>new Date(e.ts)>=cutoff).slice().reverse();
@@ -880,7 +1014,22 @@ function exportPDF(data){const bn=householdData?.babyName||'Baby';const feeds=da
 
 // ── INFO MODAL ───────────────────────────────────────────────
 const INFO_DATA={feeding:{icon:'ti-baby-bottle',title:'Feeding Benchmark',body:`<strong>Target: 8–12 feedings per day</strong> for newborns (0–3 months).<br><br>The AAP recommends feeding on demand — typically every 1.5–3 hours for breastfed and every 2–4 hours for formula-fed newborns. Feeding duration of 10–20 minutes per breast is typical.`,source:`Source: AAP — <a href="https://www.healthychildren.org/English/ages-stages/baby/feeding-nutrition/Pages/How-Often-and-How-Much-Should-Your-Baby-Eat.aspx" target="_blank">How Often and How Much Should Your Baby Eat?</a>`},sleep:{icon:'ti-moon',title:'Sleep Benchmark',body:`<strong>Target: 14–17 hours per day</strong> for newborns (0–3 months).<br><br>The NSF recommends 14–17 hours of total sleep per 24 hours for newborns, spread across multiple periods.`,source:`Source: NSF — <a href="https://www.sleepfoundation.org/how-sleep-works/how-much-sleep-do-we-really-need" target="_blank">How Much Sleep Do We Really Need?</a>`},diaper:{icon:'ti-droplet',title:'Diaper Benchmark',body:`<strong>Target: 6–8 wet diapers per day</strong> after the first week. This is the AAP's key indicator of adequate hydration and feeding.`,source:`Source: AAP — <a href="https://www.healthychildren.org/English/ages-stages/baby/feeding-nutrition/Pages/Wet-Diapers-and-Newborn-Urine-Output.aspx" target="_blank">Wet Diapers and Newborn Urine Output</a>`},weight:{icon:'ti-barbell',title:'Growth Chart',body:`<strong>WHO Child Growth Standards</strong> — 10th, 50th, and 90th percentile bands.<br><br>The shaded band covers 80% of healthy babies. Being outside does not necessarily indicate a problem — discuss with your pediatrician.`,source:`Source: WHO — <a href="https://www.who.int/tools/child-growth-standards/standards/weight-for-age" target="_blank">WHO Child Growth Standards</a>`}};
-window.showInfo=type=>{const d=INFO_DATA[type];if(!d)return;document.getElementById('infoTitle').innerHTML=`<i class="ti ${d.icon}"></i> ${d.title}`;document.getElementById('infoBody').innerHTML=d.body;document.getElementById('infoSource').innerHTML=d.source;document.getElementById('infoOverlay').classList.add('show');document.body.style.overflow='hidden';};
+// Build a personalised, age/weight-aware context box for the benchmark popups
+function benchmarkContext(type){
+  const name=householdData?.babyName||'Baby';const age=ageString();let line='';
+  if(type==='feeding'){
+    const fb=feedBench(),t=ozTarget(),parts=[];
+    if(age)parts.push(`At <strong>${age}</strong>, a typical range is <strong>${fb.min}–${fb.max} feeds/day</strong>.`);
+    if(t)parts.push(`Based on the latest weight (~${Math.round(latestWeightLb)} lb), a bottle/formula intake target is about <strong>${t} oz/day</strong> (≈2.5 oz per lb).`);
+    line=parts.join(' ');
+  }else if(type==='sleep'){
+    const sb=sleepBench();
+    if(age)line=`At <strong>${age}</strong>, total sleep is typically <strong>${sb.min}–${sb.max} hrs/day</strong>.`;
+  }
+  if(!line)return '';
+  return `<div style="background:var(--teal-light);border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;color:var(--teal-dark);font-weight:500">${name}: ${line}</div>`;
+}
+window.showInfo=type=>{const d=INFO_DATA[type];if(!d)return;document.getElementById('infoTitle').innerHTML=`<i class="ti ${d.icon}"></i> ${d.title}`;document.getElementById('infoBody').innerHTML=benchmarkContext(type)+d.body;document.getElementById('infoSource').innerHTML=d.source;document.getElementById('infoOverlay').classList.add('show');document.body.style.overflow='hidden';};
 window.closeInfo=e=>{if(e&&e.target!==document.getElementById('infoOverlay'))return;document.getElementById('infoOverlay').classList.remove('show');document.body.style.overflow='';};
 window.clearLocalData=()=>showToast('Data is in Firebase — delete from History instead.');
 
@@ -902,6 +1051,19 @@ input,select,textarea{font-size:16px !important}
 .google-btn{width:100%;padding:14px;background:#fff;border:1.5px solid var(--border);border-radius:var(--radius-sm);font-size:15px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:10px;font-family:'Nunito',sans-serif;color:var(--text);transition:all .15s}
 .google-btn:hover{background:var(--gray);border-color:var(--teal)}
 .google-btn i{font-size:20px;color:#ea4335}
+/* Login: email/password form + OAuth buttons */
+.auth-input{margin-top:10px;text-align:left}
+.auth-error{color:#dc2626;font-size:12px;font-weight:700;margin-top:8px;min-height:15px;text-align:center}
+.auth-submit{margin-top:6px}
+.auth-links{display:flex;justify-content:space-between;margin-top:12px;font-size:12px;font-weight:700;color:var(--teal)}
+.auth-links span{cursor:pointer}
+.auth-links span:hover{text-decoration:underline}
+.auth-divider{display:flex;align-items:center;gap:10px;margin:16px 0 2px;color:var(--muted);font-size:12px;font-weight:600}
+.auth-divider::before,.auth-divider::after{content:'';flex:1;height:1px;background:var(--border)}
+.oauth-btn{width:100%;height:var(--ctl-h);border-radius:12px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:15px;font-weight:700;font-family:'Nunito',sans-serif;cursor:pointer;border:1.5px solid var(--border);background:#fff;color:var(--text);margin-top:10px;transition:all .15s}
+.oauth-btn:hover{background:var(--gray)}
+.oauth-btn.apple{background:#000;color:#fff;border-color:#000}
+.oauth-btn.apple:hover{background:#1a1a1a}
 .onboard-card{background:var(--white);border-radius:var(--radius);padding:24px;max-width:420px;width:100%;box-shadow:0 4px 20px rgba(29,158,117,.1);margin-bottom:14px}
 .onboard-title{font-size:16px;font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:8px;color:var(--text)}
 .onboard-title i{color:var(--teal)}
@@ -1118,7 +1280,23 @@ input,select,textarea{font-size:16px !important}
     <div class="auth-logo"><i class="ti ti-heart"></i></div>
     <div class="auth-title">Baby Tracker</div>
     <div class="auth-sub">Log feedings, sleep & diapers together with your caregiving team</div>
-    <button class="google-btn" id="btn-google"><i class="ti ti-brand-google"></i> Sign in with Google</button>
+    <input class="form-input auth-input" type="email" id="auth-email" placeholder="Email" autocomplete="email" inputmode="email"/>
+    <input class="form-input auth-input" type="password" id="auth-pass" placeholder="Password" autocomplete="current-password"/>
+    <div class="auth-error" id="auth-error"></div>
+    <button class="submit-btn auth-submit" id="btn-email-auth">Sign in</button>
+    <div class="auth-links">
+      <span id="auth-toggle">Create account</span>
+      <span id="auth-forgot">Forgot password?</span>
+    </div>
+    <div class="auth-divider"><span>or</span></div>
+    <button class="oauth-btn" id="btn-google">
+      <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+      Continue with Google
+    </button>
+    <button class="oauth-btn apple" id="btn-apple">
+      <svg width="16" height="16" viewBox="0 0 384 512" fill="currentColor" aria-hidden="true"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg>
+      Continue with Apple
+    </button>
   </div>
 </div>
 
@@ -1279,7 +1457,7 @@ input,select,textarea{font-size:16px !important}
 
         <div class="stat-row">
           <div class="stat"><div class="stat-val" id="stat-feeds">—</div><div class="stat-label">Feedings</div><div class="stat-avg" id="stat-avg-feeds"></div></div>
-          <div class="stat"><div class="stat-val" id="stat-oz">—</div><div class="stat-label">Oz consumed</div><div class="stat-avg" id="stat-avg-oz"></div></div>
+          <div class="stat"><div class="stat-val" id="stat-oz">—</div><div class="stat-label">Oz consumed</div><div class="stat-avg" id="stat-avg-oz"></div><div class="stat-avg" id="oz-target" style="display:none;color:var(--teal);font-weight:700"></div></div>
           <div class="stat"><div class="stat-val" id="stat-feed-time">—</div><div class="stat-label">Feed time</div></div>
           <div class="stat"><div class="stat-val" id="stat-sleep">—</div><div class="stat-label">Sleep hrs</div></div>
           <div class="stat"><div class="stat-val" id="stat-diapers">—</div><div class="stat-label">Diapers</div><div class="stat-avg" id="stat-avg-diapers"></div></div>
@@ -1295,7 +1473,7 @@ input,select,textarea{font-size:16px !important}
             </div>
             <select class="gran-select" id="gran-feed" onchange="setGranularity('feed',this.value)"><option value="auto">Auto</option><option value="hour">Hourly</option><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option></select>
           </div>
-          <div class="benchmark-legend"><span><span class="legend-dot" style="background:#1D9E75"></span>Baby</span><span><span class="legend-dot" style="background:rgba(255,180,0,.7)"></span>AAP (8–12/day)</span></div>
+          <div class="benchmark-legend"><span><span class="legend-dot" style="background:#1D9E75"></span>Baby</span><span><span class="legend-dot" style="background:rgba(255,180,0,.7)"></span><span id="feed-bench-label">AAP (8–12/day)</span></span></div>
           <div class="chart-scroll-wrap"><div class="chart-wrap"><canvas id="feedChart"></canvas></div></div>
         </div>
 
@@ -1305,7 +1483,7 @@ input,select,textarea{font-size:16px !important}
             <div class="chart-filters"></div>
             <select class="gran-select" id="gran-sleep" onchange="setGranularity('sleep',this.value)"><option value="auto">Auto</option><option value="hour">Hourly</option><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option></select>
           </div>
-          <div class="benchmark-legend"><span><span class="legend-dot" style="background:#1D9E75"></span>Baby</span><span><span class="legend-dot" style="background:rgba(100,149,237,.6)"></span>NSF (14–17 hrs)</span></div>
+          <div class="benchmark-legend"><span><span class="legend-dot" style="background:#1D9E75"></span>Baby</span><span><span class="legend-dot" style="background:rgba(100,149,237,.6)"></span><span id="sleep-bench-label">NSF (14–17 hrs)</span></span></div>
           <div class="chart-scroll-wrap"><div class="chart-wrap"><canvas id="sleepChart"></canvas></div></div>
         </div>
 
