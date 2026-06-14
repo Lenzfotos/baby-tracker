@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <script type="module">
 import{initializeApp}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import{getAuth,GoogleAuthProvider,OAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,signOut,onAuthStateChanged,setPersistence,browserLocalPersistence,signInWithEmailAndPassword,createUserWithEmailAndPassword,sendPasswordResetEmail}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import{getAuth,GoogleAuthProvider,OAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,signOut,onAuthStateChanged,setPersistence,browserLocalPersistence,signInWithEmailAndPassword,createUserWithEmailAndPassword,sendPasswordResetEmail,updateProfile}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 import{getFirestore,doc,setDoc,getDoc,addDoc,updateDoc,deleteDoc,collection,query,onSnapshot,orderBy,getDocs}from"https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const firebaseConfig={apiKey:"AIzaSyCWgep90LXLN3VhMeZx2IdJHfo4ut8JROc",authDomain:"baby-tracker-f1eed.firebaseapp.com",projectId:"baby-tracker-f1eed",storageBucket:"baby-tracker-f1eed.firebasestorage.app",messagingSenderId:"1071084232072",appId:"1:1071084232072:web:409cdfd67509792618ee3d"};
@@ -203,16 +203,24 @@ document.addEventListener('DOMContentLoaded',()=>{
 window.signOutUser=async()=>{if(!confirm('Sign out?'))return;if(unsubEntries)unsubEntries();if(unsubHousehold)unsubHousehold();await signOut(auth);localEntries=[];membersList=[];householdId=null;householdData=null;};
 
 // ── HOUSEHOLD ────────────────────────────────────────────────
+// Make sure the signed-in user has a display name (email/Apple may not provide one)
+async function ensureMyName(){
+  const n=(document.getElementById('ob-your-name')?.value||'').trim();
+  if(!n){showToast('Please enter your name');return null;}
+  if(n!==currentUser.displayName){try{await updateProfile(currentUser,{displayName:n});}catch(e){}}
+  return n;
+}
 window.createHousehold=async()=>{
   const babyName=document.getElementById('ob-baby-name').value.trim();
   const dob=document.getElementById('ob-dob').value;
   const sex=document.getElementById('ob-sex').value;
   if(!babyName){showToast('Please enter baby\'s name');return;}
+  const myName=await ensureMyName();if(!myName)return;
   setBtnLoading('btn-create-hh',true,'Creating…');
   const code=Math.random().toString(36).substring(2,8).toUpperCase();
   const hhRef=doc(collection(db,'households'));
   householdId=hhRef.id;
-  await setDoc(hhRef,{babyName,dob,sex,inviteCode:code,ownerUid:currentUser.uid,members:{[currentUser.uid]:{name:currentUser.displayName,email:currentUser.email,photo:currentUser.photoURL,role:'owner'}}});
+  await setDoc(hhRef,{babyName,dob,sex,inviteCode:code,ownerUid:currentUser.uid,members:{[currentUser.uid]:{name:myName,email:currentUser.email,photo:currentUser.photoURL,role:'owner'}}});
   await setDoc(doc(db,'inviteCodes',code),{householdId});
   await setDoc(doc(db,'users',currentUser.uid),{householdId},{merge:true});
   await loadHousehold();
@@ -221,11 +229,12 @@ window.createHousehold=async()=>{
 window.joinHousehold=async()=>{
   const code=document.getElementById('ob-invite-code').value.trim().toUpperCase();
   if(!code){showToast('Enter an invite code');return;}
+  const myName=await ensureMyName();if(!myName)return;
   setBtnLoading('btn-join-hh',true,'Joining…');
   const codeSnap=await getDoc(doc(db,'inviteCodes',code));
   if(!codeSnap.exists()){showToast('Invalid invite code');setBtnLoading('btn-join-hh',false,'Join household');return;}
   householdId=codeSnap.data().householdId;
-  await updateDoc(doc(db,'households',householdId),{[`members.${currentUser.uid}`]:{name:currentUser.displayName,email:currentUser.email,photo:currentUser.photoURL,role:'member'}});
+  await updateDoc(doc(db,'households',householdId),{[`members.${currentUser.uid}`]:{name:myName,email:currentUser.email,photo:currentUser.photoURL,role:'member'}});
   await setDoc(doc(db,'users',currentUser.uid),{householdId},{merge:true});
   await loadHousehold();
   setBtnLoading('btn-join-hh',false,'Join household');
@@ -253,7 +262,7 @@ function subscribeEntries(){
     renderDebounce=setTimeout(()=>{renderHistory();renderDashboard();updateEntryCount();},80);
   });
 }
-function showScreen(s){['loading','login','onboard','app'].forEach(id=>{const el=document.getElementById('screen-'+id);if(el)el.style.display=id===s?'flex':'none';});}
+function showScreen(s){['loading','login','onboard','app'].forEach(id=>{const el=document.getElementById('screen-'+id);if(el)el.style.display=id===s?'flex':'none';});if(s==='onboard'){const n=document.getElementById('ob-your-name');if(n&&!n.value)n.value=currentUser?.displayName||'';}}
 
 // ── HOUSEHOLD UI ─────────────────────────────────────────────
 function updateHouseholdUI(){
@@ -1309,6 +1318,9 @@ input,select,textarea{font-size:16px !important}
       <div style="font-size:13px;color:var(--muted);font-weight:500;margin-top:4px">Create a household or join one</div>
     </div>
     <div class="onboard-card">
+      <div class="form-row" style="margin-bottom:0"><label class="form-label">Your name</label><input class="form-input" type="text" id="ob-your-name" placeholder="e.g. Alex" autocomplete="name"/></div>
+    </div>
+    <div class="onboard-card" style="margin-top:8px">
       <div class="onboard-title"><i class="ti ti-home-plus"></i> Create household</div>
       <div class="onboard-sub">You'll be the owner. Set up the baby's profile and invite caregivers.</div>
       <div class="form-row"><label class="form-label">Baby's name</label><input class="form-input" type="text" id="ob-baby-name" placeholder="e.g. Luca"/></div>
